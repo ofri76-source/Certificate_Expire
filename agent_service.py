@@ -159,21 +159,33 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
     parsed_cert = None
     parsed_not_after = None
     parsed_cn = ""
-    parsed_issuer_org = ""
+    parsed_issuer = ""
     parsed_san = []
 
     if _HAS_CRYPTO and cert_der:
         try:
             parsed_cert = x509.load_der_x509_certificate(cert_der, default_backend())
             parsed_not_after = parsed_cert.not_valid_after
+
             cn_attr = parsed_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
             if cn_attr:
                 parsed_cn = cn_attr[0].value or ""
+
             issuer_org_attr = parsed_cert.issuer.get_attributes_for_oid(
                 NameOID.ORGANIZATION_NAME
             )
+            issuer_cn_attr = parsed_cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
             if issuer_org_attr:
-                parsed_issuer_org = issuer_org_attr[0].value or ""
+                parsed_issuer = issuer_org_attr[0].value or ""
+            elif issuer_cn_attr:
+                parsed_issuer = issuer_cn_attr[0].value or ""
+            elif parsed_cert.issuer.rdns:
+                # fallback to the first attribute value to avoid empty issuer on unusual certs
+                first_attr = parsed_cert.issuer.rdns[0].get_attributes_for_oid(
+                    parsed_cert.issuer.rdns[0][0].oid
+                )[0].value
+                parsed_issuer = first_attr or ""
+
             try:
                 san_ext = parsed_cert.extensions.get_extension_for_oid(
                     ExtensionOID.SUBJECT_ALTERNATIVE_NAME
@@ -186,7 +198,9 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
         except Exception as e:  # pragma: no cover - best-effort parsing
             log.warning("Could not decode certificate for %s:%s (%s)", host, port, e)
     elif not _HAS_CRYPTO and cert_der:
-        log.warning("cryptography not installed; skipping DER parsing for %s:%s", host, port)
+        log.warning(
+            "cryptography not installed; install it to enable full certificate parsing"
+        )
 
     not_after = ""
     expiry_ts = 0
@@ -214,8 +228,8 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
         return ""
 
     cn = parsed_cn or _first_match(cert_dict.get("subject"), "commonName", "CN")
-    issuer_name = parsed_issuer_org or _first_match(
-        cert_dict.get("issuer"), "organizationName", "O"
+    issuer_name = parsed_issuer or _first_match(
+        cert_dict.get("issuer"), "organizationName", "O", "commonName", "CN"
     )
 
     san = parsed_san
