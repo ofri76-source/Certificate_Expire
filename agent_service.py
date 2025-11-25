@@ -5,7 +5,12 @@ import json
 import logging
 import socket
 import ssl
+import tempfile
 from datetime import datetime, timezone
+
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.x509.oid import ExtensionOID, NameOID
 import urllib.parse
 from logging.handlers import TimedRotatingFileHandler
 
@@ -118,19 +123,15 @@ def _parse_target(task: dict):
 
 
 def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
-    """
-    פתיחת TLS ל-host:port והחזרת פרטי התעודה.
+    cert_dict = None
+    cert_der = None
 
-    קודם מנסה עם אימות מלא (ברירת המחדל). במקרה של ssl.SSLError, מבצע
-    ניסיון שני ללא אימות CA כדי לחלץ את התעודה וה-expiry גם אם שרשרת ה-CA
-    אינה אמינה.
-    """
-    # ניסיון ראשון – אימות מלא (ברירת מחדל)
     ctx = ssl.create_default_context()
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                cert = ssock.getpeercert()
+                cert_dict = ssock.getpeercert()
+                cert_der = ssock.getpeercert(binary_form=True)
     except ssl.SSLError as e:
         log.warning(
             "TLS verify failed for %s:%s (%s); retrying without certificate verification",
@@ -143,35 +144,80 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
         insecure_ctx.verify_mode = ssl.CERT_NONE
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with insecure_ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                cert = ssock.getpeercert()
+                cert_dict = ssock.getpeercert()
+                cert_der = ssock.getpeercert(binary_form=True)
 
-    not_after = cert.get("notAfter")  # e.g. 'Dec 31 23:59:59 2029 GMT'
+    if not isinstance(cert_dict, dict):
+        cert_dict = {}
 
-    # CN
-    subj = dict(x for x in (cert.get("subject") or [])[0])
-    cn = subj.get("commonName") or subj.get("CN") or ""
+    parsed_cert = None
+    parsed_not_after = None
+    parsed_cn = ""
+    parsed_issuer_org = ""
+    parsed_san = []
 
-    # Issuer
-    iss = dict(x for x in (cert.get("issuer") or [])[0])
-    issuer_name = iss.get("organizationName") or iss.get("O") or ""
-
-    # SANs
-    san = []
-    for t in cert.get("subjectAltName", []):
-        if t and len(t) >= 2:
-            san.append(t[1])
-
-    # expiry_ts
-    expiry_ts = 0
-    if not_after:
+    if cert_der:
         try:
-            tm = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
-            expiry_ts = int(tm.replace(tzinfo=timezone.utc).timestamp())
-        except Exception:
-            pass
+            parsed_cert = x509.load_der_x509_certificate(cert_der, default_backend())
+            parsed_not_after = parsed_cert.not_valid_after
+            cn_attr = parsed_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+            if cn_attr:
+                parsed_cn = cn_attr[0].value or ""
+            issuer_org_attr = parsed_cert.issuer.get_attributes_for_oid(
+                NameOID.ORGANIZATION_NAME
+            )
+            if issuer_org_attr:
+                parsed_issuer_org = issuer_org_attr[0].value or ""
+            try:
+                san_ext = parsed_cert.extensions.get_extension_for_oid(
+                    ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+                )
+                dns_names = san_ext.value.get_values_for_type(x509.DNSName)
+                ip_names = [str(ip) for ip in san_ext.value.get_values_for_type(x509.IPAddress)]
+                parsed_san = dns_names + ip_names
+            except x509.ExtensionNotFound:
+                parsed_san = []
+        except Exception as e:  # pragma: no cover - best-effort parsing
+            log.warning("Could not decode certificate for %s:%s (%s)", host, port, e)
+
+    not_after = ""
+    expiry_ts = 0
+    if parsed_not_after:
+        dt = parsed_not_after
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        not_after = dt.strftime("%b %d %H:%M:%S %Y %Z")
+        expiry_ts = int(dt.timestamp())
+    else:
+        not_after = cert_dict.get("notAfter") or ""
+        if not_after:
+            try:
+                dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+                dt = dt.replace(tzinfo=timezone.utc)
+                expiry_ts = int(dt.timestamp())
+            except Exception:
+                expiry_ts = 0
+
+    def _first_match(seq, *keys):
+        for item in seq or []:
+            for key, val in item:
+                if key in keys and val:
+                    return val
+        return ""
+
+    cn = parsed_cn or _first_match(cert_dict.get("subject"), "commonName", "CN")
+    issuer_name = parsed_issuer_org or _first_match(
+        cert_dict.get("issuer"), "organizationName", "O"
+    )
+
+    san = parsed_san
+    if not san:
+        for t in cert_dict.get("subjectAltName", []):
+            if t and len(t) >= 2 and t[1]:
+                san.append(t[1])
 
     return {
-        "not_after": not_after or "",
+        "not_after": not_after,
         "common_name": cn,
         "issuer_name": issuer_name,
         "subject_alt_names": san,
