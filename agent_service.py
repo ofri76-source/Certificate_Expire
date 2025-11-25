@@ -7,6 +7,10 @@ import socket
 import ssl
 import tempfile
 from datetime import datetime, timezone
+
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.x509.oid import ExtensionOID, NameOID
 import urllib.parse
 from logging.handlers import TimedRotatingFileHandler
 
@@ -147,58 +151,71 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
     if not isinstance(cert_dict, dict):
         cert_dict = {}
 
-    decoded_cert = None
+    parsed_cert = None
+    parsed_not_after = None
+    parsed_cn = ""
+    parsed_issuer_org = ""
+    parsed_san = []
+
     if cert_der:
-        tmp_path = None
         try:
-            pem_data = ssl.DER_cert_to_PEM_cert(cert_der)
-            with tempfile.NamedTemporaryFile("w+", delete=False) as tmp:
-                tmp.write(pem_data)
-                tmp.flush()
-                tmp_path = tmp.name
-            decoded_cert = ssl._ssl._test_decode_cert(tmp_path)
+            parsed_cert = x509.load_der_x509_certificate(cert_der, default_backend())
+            parsed_not_after = parsed_cert.not_valid_after
+            cn_attr = parsed_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+            if cn_attr:
+                parsed_cn = cn_attr[0].value or ""
+            issuer_org_attr = parsed_cert.issuer.get_attributes_for_oid(
+                NameOID.ORGANIZATION_NAME
+            )
+            if issuer_org_attr:
+                parsed_issuer_org = issuer_org_attr[0].value or ""
+            try:
+                san_ext = parsed_cert.extensions.get_extension_for_oid(
+                    ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+                )
+                dns_names = san_ext.value.get_values_for_type(x509.DNSName)
+                ip_names = [str(ip) for ip in san_ext.value.get_values_for_type(x509.IPAddress)]
+                parsed_san = dns_names + ip_names
+            except x509.ExtensionNotFound:
+                parsed_san = []
         except Exception as e:  # pragma: no cover - best-effort parsing
             log.warning("Could not decode certificate for %s:%s (%s)", host, port, e)
-        finally:
-            if tmp_path:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
 
-    not_after = (decoded_cert or {}).get("notAfter") or cert_dict.get("notAfter") or ""
-
-    # Subject
-    subj_list = cert_dict.get("subject") or []
-    if subj_list:
-        subj = dict(x for x in subj_list[0])
-    else:
-        subj = {}
-    cn = subj.get("commonName") or subj.get("CN") or ""
-
-    # Issuer
-    issuer_list = cert_dict.get("issuer") or []
-    if issuer_list:
-        iss = dict(x for x in issuer_list[0])
-    else:
-        iss = {}
-    issuer_name = iss.get("organizationName") or iss.get("O") or ""
-
-    # SAN
-    san = []
-    for t in cert_dict.get("subjectAltName", []):
-        if t and len(t) >= 2:
-            san.append(t[1])
-
-    # Expiry
+    not_after = ""
     expiry_ts = 0
-    if not_after:
-        try:
-            dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+    if parsed_not_after:
+        dt = parsed_not_after
+        if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-            expiry_ts = int(dt.timestamp())
-        except Exception:
-            expiry_ts = 0
+        not_after = dt.strftime("%b %d %H:%M:%S %Y %Z")
+        expiry_ts = int(dt.timestamp())
+    else:
+        not_after = cert_dict.get("notAfter") or ""
+        if not_after:
+            try:
+                dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+                dt = dt.replace(tzinfo=timezone.utc)
+                expiry_ts = int(dt.timestamp())
+            except Exception:
+                expiry_ts = 0
+
+    def _first_match(seq, *keys):
+        for item in seq or []:
+            for key, val in item:
+                if key in keys and val:
+                    return val
+        return ""
+
+    cn = parsed_cn or _first_match(cert_dict.get("subject"), "commonName", "CN")
+    issuer_name = parsed_issuer_org or _first_match(
+        cert_dict.get("issuer"), "organizationName", "O"
+    )
+
+    san = parsed_san
+    if not san:
+        for t in cert_dict.get("subjectAltName", []):
+            if t and len(t) >= 2 and t[1]:
+                san.append(t[1])
 
     return {
         "not_after": not_after,
