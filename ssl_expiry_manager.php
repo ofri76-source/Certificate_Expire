@@ -1136,10 +1136,14 @@ class SSL_Expiry_Manager_AIO {
 }
 .ssl-management-cell{white-space:nowrap;font-weight:700;color:#0f172a;}
 .ssl-bulk-editor__filter-form{margin-bottom:8px;}
+.ssl-bulk-grid__wrapper{width:100%;overflow-x:auto;overflow-y:hidden;padding-bottom:8px;}
+.ssl-bulk-grid{min-width:1280px;}
 .ssl-bulk-grid thead th{position:sticky;top:0;background:#f8fafc;}
 .ssl-bulk-grid__filters-row input,.ssl-bulk-grid__filters-row select{width:100%;padding:.35rem .45rem;border:1px solid #cbd5f5;border-radius:8px;background:#fff;font-size:.85rem;}
 .ssl-bulk-grid__per-page{max-width:70px;text-align:center;}
 .ssl-bulk-grid__temporary textarea,.ssl-bulk-grid textarea{width:100%;min-height:36px;resize:vertical;}
+.ssl-bulk-grid input[type=text],.ssl-bulk-grid input[type=date],.ssl-bulk-grid select{min-width:160px;}
+.ssl-bulk-grid textarea{min-width:220px;}
 .ssl-bulk-grid__guide{margin-top:6px;width:100%;}
 .ssl-bulk-grid__actions{white-space:nowrap;}
 .ssl-err{color:#b00020;font-size:.85rem;}
@@ -4176,6 +4180,7 @@ JS;
         echo "<input type='hidden' name='ssl_bulk_sort' value='".esc_attr($sort)."'>";
         echo "<input type='hidden' name='ssl_bulk_order' value='".esc_attr($order)."'>";
         echo "</form>";
+        echo "<div class='ssl-bulk-grid__wrapper'>";
         echo "<table class='ssl-table ssl-bulk-grid'><thead>";
         echo "<tr>";
         echo "<th>#</th>";
@@ -4245,6 +4250,7 @@ JS;
             echo "<tr><td colspan='11' class='ssl-empty'>אין נתונים לעריכה</td></tr>";
         }
         echo "</tbody></table>";
+        echo "</div>";
 
         if($total_pages > 1){
             $pagination_args = [];
