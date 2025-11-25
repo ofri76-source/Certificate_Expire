@@ -135,6 +135,7 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
             port,
             e,
         )
+        # ניסיון שני – בלי אימות CA, רק כדי לקרוא תעודה
         insecure_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         insecure_ctx.check_hostname = False
         insecure_ctx.verify_mode = ssl.CERT_NONE
