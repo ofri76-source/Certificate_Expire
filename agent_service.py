@@ -8,9 +8,14 @@ import ssl
 import tempfile
 from datetime import datetime, timezone
 
-from cryptography import x509
-from cryptography.hazmat.backends import default_backend
-from cryptography.x509.oid import ExtensionOID, NameOID
+import importlib.util
+
+_HAS_CRYPTO = importlib.util.find_spec("cryptography") is not None
+
+if _HAS_CRYPTO:
+    from cryptography import x509
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.x509.oid import ExtensionOID, NameOID
 import urllib.parse
 from logging.handlers import TimedRotatingFileHandler
 
@@ -157,7 +162,7 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
     parsed_issuer_org = ""
     parsed_san = []
 
-    if cert_der:
+    if _HAS_CRYPTO and cert_der:
         try:
             parsed_cert = x509.load_der_x509_certificate(cert_der, default_backend())
             parsed_not_after = parsed_cert.not_valid_after
@@ -180,6 +185,8 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
                 parsed_san = []
         except Exception as e:  # pragma: no cover - best-effort parsing
             log.warning("Could not decode certificate for %s:%s (%s)", host, port, e)
+    elif not _HAS_CRYPTO and cert_der:
+        log.warning("cryptography not installed; skipping DER parsing for %s:%s", host, port)
 
     not_after = ""
     expiry_ts = 0
