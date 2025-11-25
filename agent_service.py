@@ -5,6 +5,7 @@ import json
 import logging
 import socket
 import ssl
+import tempfile
 from datetime import datetime, timezone
 import urllib.parse
 from logging.handlers import TimedRotatingFileHandler
@@ -118,13 +119,15 @@ def _parse_target(task: dict):
 
 
 def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
-    cert = None
+    cert_dict = None
+    cert_der = None
 
     ctx = ssl.create_default_context()
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                cert = ssock.getpeercert()
+                cert_dict = ssock.getpeercert()
+                cert_der = ssock.getpeercert(binary_form=True)
     except ssl.SSLError as e:
         log.warning(
             "TLS verify failed for %s:%s (%s); retrying without certificate verification",
@@ -138,15 +141,35 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
         insecure_ctx.verify_mode = ssl.CERT_NONE
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with insecure_ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                cert = ssock.getpeercert()
+                cert_dict = ssock.getpeercert()
+                cert_der = ssock.getpeercert(binary_form=True)
 
-    if not isinstance(cert, dict):
-        cert = {}
+    if not isinstance(cert_dict, dict):
+        cert_dict = {}
 
-    not_after = cert.get("notAfter") or ""
+    decoded_cert = None
+    if cert_der:
+        tmp_path = None
+        try:
+            pem_data = ssl.DER_cert_to_PEM_cert(cert_der)
+            with tempfile.NamedTemporaryFile("w+", delete=False) as tmp:
+                tmp.write(pem_data)
+                tmp.flush()
+                tmp_path = tmp.name
+            decoded_cert = ssl._ssl._test_decode_cert(tmp_path)
+        except Exception as e:  # pragma: no cover - best-effort parsing
+            log.warning("Could not decode certificate for %s:%s (%s)", host, port, e)
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    not_after = (decoded_cert or {}).get("notAfter") or cert_dict.get("notAfter") or ""
 
     # Subject
-    subj_list = cert.get("subject") or []
+    subj_list = cert_dict.get("subject") or []
     if subj_list:
         subj = dict(x for x in subj_list[0])
     else:
@@ -154,7 +177,7 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
     cn = subj.get("commonName") or subj.get("CN") or ""
 
     # Issuer
-    issuer_list = cert.get("issuer") or []
+    issuer_list = cert_dict.get("issuer") or []
     if issuer_list:
         iss = dict(x for x in issuer_list[0])
     else:
@@ -163,7 +186,7 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
 
     # SAN
     san = []
-    for t in cert.get("subjectAltName", []):
+    for t in cert_dict.get("subjectAltName", []):
         if t and len(t) >= 2:
             san.append(t[1])
 
