@@ -120,7 +120,6 @@ def _parse_target(task: dict):
 def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
     cert = None
 
-    # ניסיון ראשון – אימות מלא
     ctx = ssl.create_default_context()
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
@@ -144,9 +143,9 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
     if not isinstance(cert, dict):
         cert = {}
 
-    not_after = cert.get("notAfter")
+    not_after = cert.get("notAfter") or ""
 
-    # Subject (CN)
+    # Subject
     subj_list = cert.get("subject") or []
     if subj_list:
         subj = dict(x for x in subj_list[0])
@@ -168,7 +167,7 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
         if t and len(t) >= 2:
             san.append(t[1])
 
-    # expiry
+    # Expiry
     expiry_ts = 0
     if not_after:
         try:
@@ -179,7 +178,7 @@ def _fetch_cert(host: str, port: int, timeout: int = 15) -> dict:
             expiry_ts = 0
 
     return {
-        "not_after": not_after or "",
+        "not_after": not_after,
         "common_name": cn,
         "issuer_name": issuer_name,
         "subject_alt_names": san,
