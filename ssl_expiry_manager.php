@@ -1136,10 +1136,17 @@ class SSL_Expiry_Manager_AIO {
 }
 .ssl-management-cell{white-space:nowrap;font-weight:700;color:#0f172a;}
 .ssl-bulk-editor__filter-form{margin-bottom:8px;}
+.ssl-bulk-grid__wrapper{width:100%;overflow-x:auto;overflow-y:hidden;padding-bottom:8px;}
+.ssl-bulk-grid{min-width:1280px;}
 .ssl-bulk-grid thead th{position:sticky;top:0;background:#f8fafc;}
 .ssl-bulk-grid__filters-row input,.ssl-bulk-grid__filters-row select{width:100%;padding:.35rem .45rem;border:1px solid #cbd5f5;border-radius:8px;background:#fff;font-size:.85rem;}
 .ssl-bulk-grid__per-page{max-width:70px;text-align:center;}
 .ssl-bulk-grid__temporary textarea,.ssl-bulk-grid textarea{width:100%;min-height:36px;resize:vertical;}
+.ssl-bulk-grid input[type=text],.ssl-bulk-grid input[type=date],.ssl-bulk-grid select{min-width:160px;}
+.ssl-bulk-grid textarea{min-width:220px;}
+.ssl-bulk-grid__input-site{min-width:480px;}
+.ssl-bulk-grid__input-cn{min-width:320px;}
+.ssl-bulk-grid__input-management{min-width:80px;}
 .ssl-bulk-grid__guide{margin-top:6px;width:100%;}
 .ssl-bulk-grid__actions{white-space:nowrap;}
 .ssl-err{color:#b00020;font-size:.85rem;}
@@ -4176,6 +4183,7 @@ JS;
         echo "<input type='hidden' name='ssl_bulk_sort' value='".esc_attr($sort)."'>";
         echo "<input type='hidden' name='ssl_bulk_order' value='".esc_attr($order)."'>";
         echo "</form>";
+        echo "<div class='ssl-bulk-grid__wrapper'>";
         echo "<table class='ssl-table ssl-bulk-grid'><thead>";
         echo "<tr>";
         echo "<th>#</th>";
@@ -4193,11 +4201,11 @@ JS;
         echo "<tr class='ssl-bulk-grid__filters-row'>";
         echo "<th><input type='number' form='".esc_attr($filter_form_id)."' name='ssl_bulk_per_page' min='1' value='".esc_attr($per_page)."' class='ssl-bulk-grid__per-page' aria-label='רשומות בעמוד'></th>";
         echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='bulk_client' value='".esc_attr($filter_client)."' placeholder='לקוח'></th>";
-        echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='bulk_site' value='".esc_attr($filter_site)."' placeholder='אתר'></th>";
-        echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='bulk_cn' value='".esc_attr($filter_cn)."' placeholder='CN'></th>";
+        echo "<th><input class='ssl-bulk-grid__input-site' type='text' form='".esc_attr($filter_form_id)."' name='bulk_site' value='".esc_attr($filter_site)."' placeholder='אתר'></th>";
+        echo "<th><input class='ssl-bulk-grid__input-cn' type='text' form='".esc_attr($filter_form_id)."' name='bulk_cn' value='".esc_attr($filter_cn)."' placeholder='CN'></th>";
         echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='ssl_bulk_expiry_hint' value='' placeholder='סינון לפי תאריך' disabled></th>";
         echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='bulk_cert_type' value='".esc_attr($filter_cert_type)."' placeholder='סוג'></th>";
-        echo "<th><select form='".esc_attr($filter_form_id)."' name='bulk_management'><option value=''>הכל</option><option value='ours'".selected($filter_management,'ours',false).">שלנו</option><option value='not-ours'".selected($filter_management,'not-ours',false).">לא שלנו</option></select></th>";
+        echo "<th><select class='ssl-bulk-grid__input-management' form='".esc_attr($filter_form_id)."' name='bulk_management'><option value=''>הכל</option><option value='ours'".selected($filter_management,'ours',false).">שלנו</option><option value='not-ours'".selected($filter_management,'not-ours',false).">לא שלנו</option></select></th>";
         echo "<th><select form='".esc_attr($filter_form_id)."' name='bulk_manual'><option value=''>הכל</option><option value='1'".selected($filter_manual,'1',false).">ידני</option><option value='0'".selected($filter_manual,'0',false).">אוטומטי</option></select></th>";
         echo "<th></th><th></th>";
         echo "<th><button class='ssl-btn ssl-btn-primary' type='submit' form='".esc_attr($filter_form_id)."'>סנן</button></th>";
@@ -4228,11 +4236,11 @@ JS;
                 echo "<tr>";
                 echo "<td class='ssl-bulk-grid__id'>".esc_html($id)."</td>";
                 echo "<td><input form='".esc_attr($form_id)."' type='text' name='client_name' value='".esc_attr($client)."'></td>";
-                echo "<td><input form='".esc_attr($form_id)."' type='text' name='site_url' value='".esc_attr($url)."'></td>";
-                echo "<td><input form='".esc_attr($form_id)."' type='text' name='cert_cn' value='".esc_attr($cn)."'></td>";
+                echo "<td><input class='ssl-bulk-grid__input-site' form='".esc_attr($form_id)."' type='text' name='site_url' value='".esc_attr($url)."'></td>";
+                echo "<td><input class='ssl-bulk-grid__input-cn' form='".esc_attr($form_id)."' type='text' name='cert_cn' value='".esc_attr($cn)."'></td>";
                 echo "<td><input form='".esc_attr($form_id)."' type='date' name='expiry_date' value='".esc_attr($this->fmt_date_input($expiry))."'></td>";
                 echo "<td><select form='".esc_attr($form_id)."' name='cert_type'>".$cert_type_options_current."</select></td>";
-                echo "<td><select form='".esc_attr($form_id)."' name='management_owner'><option value='ours'".selected($management_owner,'ours',false).">שלנו</option><option value='not-ours'".selected($management_owner,'not-ours',false).">לא שלנו</option></select></td>";
+                echo "<td><select class='ssl-bulk-grid__input-management' form='".esc_attr($form_id)."' name='management_owner'><option value='ours'".selected($management_owner,'ours',false).">שלנו</option><option value='not-ours'".selected($management_owner,'not-ours',false).">לא שלנו</option></select></td>";
                 $manual_checked = $manual_mode_row ? " checked" : '';
                 echo "<td class='ssl-bulk-grid__checkbox'><input form='".esc_attr($form_id)."' type='checkbox' name='manual_mode' value='1'{$manual_checked}></td>";
                 $temp_checked = $temporary_enabled ? " checked" : '';
@@ -4245,6 +4253,7 @@ JS;
             echo "<tr><td colspan='11' class='ssl-empty'>אין נתונים לעריכה</td></tr>";
         }
         echo "</tbody></table>";
+        echo "</div>";
 
         if($total_pages > 1){
             $pagination_args = [];
