@@ -4124,6 +4124,8 @@ JS;
         $manage_action = esc_attr(self::MANAGE_TOKEN_ACTION);
         $types_action  = esc_attr(self::SAVE_CERT_TYPES_ACTION);
         $general_action = esc_attr(self::SAVE_GENERAL_SETTINGS_ACTION);
+        $test_mail_form_id = 'ssl-test-mail-form';
+        $test_mail_action = esc_attr(self::SEND_TEST_EMAIL_ACTION);
         $email_choices = $this->collect_token_email_choices();
         $scheduled_notice = isset($_GET['ssl_batch']) ? max(0, intval($_GET['ssl_batch'])) : 0;
         $batch_error = isset($_GET['ssl_batch_error']);
@@ -4247,7 +4249,6 @@ JS;
         echo "</form>";
         echo "</div>";
 
-        $test_mail_form_id = 'ssl-test-mail-form';
         echo "<div class='ssl-card ssl-card--form ssl-card--mail'>";
         echo "<div class='ssl-card__header'><h3>הגדרות דואר</h3></div>";
         echo "<form id='ssl-mail-form' class='ssl-general-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field()
@@ -4262,7 +4263,6 @@ JS;
             ."  <label><span>שם שולח</span><input type='text' name='smtp_from_name' placeholder='SSL Monitor' value='".esc_attr($smtp_from_name_value)."'></label>"
             ."</div>";
         echo "<div class='ssl-card__footer'><div class='ssl-card__footer-actions'><button class='ssl-btn ssl-btn-primary' type='submit'>שמור הגדרות דואר</button>";
-        $test_mail_action = esc_attr(self::SEND_TEST_EMAIL_ACTION);
         echo "<button class='ssl-btn ssl-btn-surface' type='submit' form='".esc_attr($test_mail_form_id)."'>בדיקת שליחת דואר</button></div><span class='ssl-note'>שדות אלו משמשים לשליחת התראות מהתוסף.</span></div>";
         echo "</form>";
         echo "<form id='".esc_attr($test_mail_form_id)."' class='ssl-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."' hidden>".$this->nonce_field()
