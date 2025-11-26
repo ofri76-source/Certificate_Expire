@@ -4227,6 +4227,10 @@ JS;
             ."</div>";
         echo "<div class='ssl-card__footer'><button class='ssl-btn ssl-btn-primary' type='submit'>שמור הגדרות</button><span class='ssl-note'>הגדרות כלליות עבור התוסף, כולל הפעלת רישום לקובץ.</span></div>";
         echo "</form>";
+        echo "<form id='".esc_attr($test_mail_form_id)."' class='ssl-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."' hidden>".$this->nonce_field()
+            ."<input type='hidden' name='action' value='{$test_mail_action}'>"
+            ."</form>";
+        echo "</div>";
         echo "</div>";
 
         echo "<div class='ssl-card ssl-card--form ssl-card--monitor'>";
