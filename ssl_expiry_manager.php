@@ -137,6 +137,8 @@ class SSL_Expiry_Manager_AIO {
         add_action('init', [$this,'ensure_general_settings_store']);
         add_action('init', [$this,'maybe_seed_sql_table']);
 
+        add_action('wp_mail_failed', [$this,'handle_mail_failure']);
+
         add_action('rest_api_init', [$this,'register_rest']);
         add_action('admin_menu',    [$this,'settings_page']);
         register_activation_hook(__FILE__, [$this,'on_activate']);
@@ -1145,15 +1147,15 @@ class SSL_Expiry_Manager_AIO {
 .ssl-management-cell{white-space:nowrap;font-weight:700;color:#0f172a;}
 .ssl-bulk-editor__filter-form{margin-bottom:8px;}
 .ssl-bulk-grid__wrapper{width:100%;overflow-x:auto;overflow-y:hidden;padding-bottom:8px;}
-.ssl-bulk-grid{min-width:1280px;}
+.ssl-bulk-grid{min-width:2200px;}
 .ssl-bulk-grid thead th{position:sticky;top:0;background:#f8fafc;}
 .ssl-bulk-grid__filters-row input,.ssl-bulk-grid__filters-row select{width:100%;padding:.35rem .45rem;border:1px solid #cbd5f5;border-radius:8px;background:#fff;font-size:.85rem;}
 .ssl-bulk-grid__per-page{max-width:70px;text-align:center;}
 .ssl-bulk-grid__temporary textarea,.ssl-bulk-grid textarea{width:100%;min-height:36px;resize:vertical;}
-.ssl-bulk-grid input[type=text],.ssl-bulk-grid input[type=date],.ssl-bulk-grid select{min-width:160px;}
+.ssl-bulk-grid input[type=text],.ssl-bulk-grid input[type=date],.ssl-bulk-grid select{min-width:180px;}
 .ssl-bulk-grid textarea{min-width:220px;}
-.ssl-bulk-grid__input-site{min-width:1280px;}
-.ssl-bulk-grid__input-cn{min-width:800px;}
+.ssl-bulk-grid__input-site{min-width:2560px;}
+.ssl-bulk-grid__input-cn{min-width:1600px;}
 .ssl-bulk-grid__input-management{min-width:80px;}
 .ssl-bulk-grid__guide{margin-top:6px;width:100%;}
 .ssl-bulk-grid__actions{white-space:nowrap;}
@@ -4225,6 +4227,10 @@ JS;
             ."</div>";
         echo "<div class='ssl-card__footer'><button class='ssl-btn ssl-btn-primary' type='submit'>שמור הגדרות</button><span class='ssl-note'>הגדרות כלליות עבור התוסף, כולל הפעלת רישום לקובץ.</span></div>";
         echo "</form>";
+        echo "<form id='".esc_attr($test_mail_form_id)."' class='ssl-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."' hidden>".$this->nonce_field()
+            ."<input type='hidden' name='action' value='{$test_mail_action}'>"
+            ."</form>";
+        echo "</div>";
         echo "</div>";
 
         echo "<div class='ssl-card ssl-card--form ssl-card--monitor'>";
@@ -4857,6 +4863,34 @@ JS;
         $redirect = add_query_arg($status_param, $sent ? 'sent' : 'failed', $redirect);
         wp_safe_redirect($redirect);
         exit;
+    }
+
+    public function handle_mail_failure($wp_error){
+        if(!($wp_error instanceof \WP_Error)){
+            return;
+        }
+        $context = [
+            'error_code' => $wp_error->get_error_code(),
+            'error_message' => $wp_error->get_error_message(),
+        ];
+        $data = $wp_error->get_error_data();
+        if(is_array($data)){
+            if(!empty($data['to'])){
+                $context['recipients'] = $this->parse_email_list($data['to']);
+            }
+            if(!empty($data['subject'])){
+                $context['subject'] = wp_strip_all_tags((string)$data['subject']);
+            }
+            if(isset($data['phpmailer_exception_code'])){
+                $context['mailer_code'] = (int)$data['phpmailer_exception_code'];
+            }
+            if(!empty($data['debug_info']) && is_scalar($data['debug_info'])){
+                $context['debug_info'] = wp_strip_all_tags((string)$data['debug_info']);
+            }
+        } elseif(is_string($data)){
+            $context['error_data'] = wp_strip_all_tags($data);
+        }
+        $this->log_activity('שליחת מייל נכשלה', array_merge($context, $this->get_current_actor_context()), 'error');
     }
 
     public function handle_toggle_follow_up(){
