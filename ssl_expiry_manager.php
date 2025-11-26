@@ -1146,19 +1146,14 @@ class SSL_Expiry_Manager_AIO {
 .ssl-bulk-editor__filter-form{margin-bottom:8px;}
 .ssl-bulk-grid__wrapper{width:100%;overflow-x:auto;overflow-y:hidden;padding-bottom:8px;}
 .ssl-bulk-grid{min-width:1280px;}
-.ssl-bulk-grid--resizable{table-layout:fixed;}
-.ssl-bulk-grid--resizable th{position:relative;}
-.ssl-bulk-grid__handle{position:absolute;top:0;right:-4px;width:8px;cursor:col-resize;user-select:none;height:100%;}
-.ssl-bulk-grid__handle::after{content:'';position:absolute;top:6px;bottom:6px;right:3px;width:2px;background:#d4d8dd;border-radius:1px;}
-.ssl-bulk-grid__handle:active::after{background:#9aa2ad;}
 .ssl-bulk-grid thead th{position:sticky;top:0;background:#f8fafc;}
 .ssl-bulk-grid__filters-row input,.ssl-bulk-grid__filters-row select{width:100%;padding:.35rem .45rem;border:1px solid #cbd5f5;border-radius:8px;background:#fff;font-size:.85rem;}
 .ssl-bulk-grid__per-page{max-width:70px;text-align:center;}
 .ssl-bulk-grid__temporary textarea,.ssl-bulk-grid textarea{width:100%;min-height:36px;resize:vertical;}
 .ssl-bulk-grid input[type=text],.ssl-bulk-grid input[type=date],.ssl-bulk-grid select{min-width:160px;}
 .ssl-bulk-grid textarea{min-width:220px;}
-.ssl-bulk-grid__input-site{min-width:640px;}
-.ssl-bulk-grid__input-cn{min-width:400px;}
+.ssl-bulk-grid__input-site{min-width:1280px;}
+.ssl-bulk-grid__input-cn{min-width:800px;}
 .ssl-bulk-grid__input-management{min-width:80px;}
 .ssl-bulk-grid__guide{margin-top:6px;width:100%;}
 .ssl-bulk-grid__actions{white-space:nowrap;}
@@ -1625,40 +1620,6 @@ window.addEventListener('DOMContentLoaded',function(){
     sslBulkUpdateState(form);
   });
   var bulkTable = document.querySelector('.ssl-bulk-grid');
-  if(bulkTable){
-    bulkTable.classList.add('ssl-bulk-grid--resizable');
-    var headerRow = bulkTable.querySelector('thead tr');
-    var headers = headerRow ? headerRow.querySelectorAll('th') : [];
-    headers.forEach(function(th, idx){
-      if(idx === headers.length - 1){
-        return;
-      }
-      var handle = document.createElement('span');
-      handle.className = 'ssl-bulk-grid__handle';
-      var startX = 0;
-      var startWidth = 0;
-      var moveHandler = function(e){
-        var delta = e.clientX - startX;
-        var newWidth = Math.max(120, startWidth + delta);
-        th.style.width = newWidth + 'px';
-        bulkTable.querySelectorAll('tbody tr td:nth-child('+(idx+1)+')').forEach(function(cell){
-          cell.style.width = newWidth + 'px';
-        });
-      };
-      var upHandler = function(){
-        document.removeEventListener('mousemove', moveHandler);
-        document.removeEventListener('mouseup', upHandler);
-      };
-      handle.addEventListener('mousedown', function(e){
-        startX = e.clientX;
-        startWidth = th.getBoundingClientRect().width;
-        document.addEventListener('mousemove', moveHandler);
-        document.addEventListener('mouseup', upHandler);
-        e.preventDefault();
-      });
-      th.appendChild(handle);
-    });
-  }
   document.querySelectorAll('[data-ssl-form]').forEach(function(row){
     if(!row.hasAttribute('hidden')){
       var id=row.getAttribute('data-ssl-form');
@@ -3507,6 +3468,19 @@ JS;
             esc_html(number_format_i18n($requested_per_page))
         );
         echo "<div class='ssl-total-row' role='status'>{$total_row_display}</div>";
+        $stale_tokens = $this->get_stale_tokens();
+        $token_alert_minutes = ceil($token_alert_seconds / 60);
+        if(!empty($stale_tokens)){
+            $label_parts = [];
+            foreach($stale_tokens as $token){
+                $name = isset($token['name']) && $token['name'] !== '' ? $token['name'] : 'טוקן ללא שם';
+                $last_seen_label = !empty($token['last_seen']) ? date_i18n('d.m.Y H:i', (int)$token['last_seen']) : 'לא התקבל חיבור';
+                $label_parts[] = esc_html(sprintf('%s (אחרון: %s)', $name, $last_seen_label));
+            }
+            $label_text = implode(', ', $label_parts);
+            $window_label = esc_html($token_alert_minutes);
+            echo "<div class='ssl-alert ssl-alert--critical'>⚠️ החיבור לטוקנים הבאים לא זמין מעל {$window_label} דקות: {$label_text}. נשלחת התראת דוא\"ל ומומלץ לבדוק מיד.</div>";
+        }
         if($single_success_message !== ''){
             echo "<div class='ssl-alert ssl-alert--success'>".esc_html($single_success_message)."</div>";
         } elseif($single_error_message !== ''){
