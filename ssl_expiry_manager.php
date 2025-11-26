@@ -60,7 +60,7 @@ class SSL_Expiry_Manager_AIO {
     const TABLE_AGENTS = 'ssl_agents';
     const QUEUE_CLAIM_TTL = 300; // 5 minutes
     const QUEUE_MAX_ATTEMPTS = 5;
-    const TOKEN_STALE_WINDOW = 600; // 10 minutes
+    const TOKEN_STALE_WINDOW = 300; // 5 minutes
     const LOG_FILE_NAME = 'ssl_em_debug.log';
     const ADD_TOKEN_ACTION    = 'ssl_add_token';
     const MANAGE_TOKEN_ACTION = 'ssl_manage_token';
@@ -3132,7 +3132,7 @@ JS;
         $this->update_token_fields($token['id'], ['notified_down_at' => time()]);
     }
 
-    private function has_recent_agent_contact($window_seconds = 600){
+    private function has_recent_agent_contact($window_seconds = self::TOKEN_STALE_WINDOW){
         $cutoff = time() - absint($window_seconds);
         foreach($this->get_tokens() as $token){
             if(!empty($token['last_seen']) && (int)$token['last_seen'] >= $cutoff){
@@ -3144,6 +3144,19 @@ JS;
         $cutoff_mysql = gmdate('Y-m-d H:i:s', $cutoff);
         $count = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE last_seen IS NOT NULL AND last_seen >= %s", $cutoff_mysql));
         return (int)$count > 0;
+    }
+
+    private function get_stale_tokens($window_seconds = null){
+        $window_seconds = $window_seconds === null ? self::TOKEN_STALE_WINDOW : (int)$window_seconds;
+        $cutoff = time() - absint($window_seconds);
+        $stale = [];
+        foreach($this->get_tokens() as $token){
+            $last_seen = isset($token['last_seen']) ? (int)$token['last_seen'] : 0;
+            if($last_seen === 0 || $last_seen < $cutoff){
+                $stale[] = $token;
+            }
+        }
+        return $stale;
     }
 
     private function collect_token_email_choices(){
@@ -3416,6 +3429,17 @@ JS;
             esc_html(number_format_i18n($requested_per_page))
         );
         echo "<div class='ssl-total-row' role='status'>{$total_row_display}</div>";
+        $stale_tokens = $this->get_stale_tokens();
+        if(!empty($stale_tokens)){
+            $label_parts = [];
+            foreach($stale_tokens as $token){
+                $name = isset($token['name']) && $token['name'] !== '' ? $token['name'] : 'טוקן ללא שם';
+                $last_seen_label = !empty($token['last_seen']) ? date_i18n('d.m.Y H:i', (int)$token['last_seen']) : 'לא התקבל חיבור';
+                $label_parts[] = esc_html(sprintf('%s (אחרון: %s)', $name, $last_seen_label));
+            }
+            $label_text = implode(', ', $label_parts);
+            echo "<div class='ssl-alert ssl-alert--warning'>החיבור לטוקנים הבאים לא זמין מעל 5 דקות: {$label_text}. נשלחת התראת דוא\"ל במקביל.</div>";
+        }
         if($single_success_message !== ''){
             echo "<div class='ssl-alert ssl-alert--success'>".esc_html($single_success_message)."</div>";
         } elseif($single_error_message !== ''){
@@ -4063,7 +4087,6 @@ JS;
         $types_updated = isset($_GET['ssl_types']);
         $general_updated = isset($_GET['ssl_general']);
         $manual_interval = isset($general_settings['manual_interval']) ? max(1, (int)$general_settings['manual_interval']) : 10;
-        $default_gateway_value = isset($general_settings['default_gateway']) ? sanitize_text_field($general_settings['default_gateway']) : '';
         $monitor_email_value = isset($general_settings['monitor_email']) ? sanitize_email($general_settings['monitor_email']) : '';
         $expiry_alert_days = isset($general_settings['expiry_alert_days']) ? (int)$general_settings['expiry_alert_days'] : 30;
         $smtp_host_value = isset($general_settings['smtp_host']) ? sanitize_text_field($general_settings['smtp_host']) : '';
@@ -4135,22 +4158,14 @@ JS;
         echo "<div class='ssl-note'>הסוגים שנבחרו יוצגו בתווית צבעונית לצד כל רשומה בטבלה הראשית. ניתן לגרור או למלא שני סוגים בכל שורה בזכות הפריסה הרחבה.</div>";
         echo "</div>";
 
+
         echo "<div class='ssl-token-layout'>";
         echo "<div class='ssl-card ssl-card--form ssl-card--general'>";
         echo "<div class='ssl-card__header'><h3>הגדרות כלליות</h3></div>";
         echo "<form id='ssl-general-form' class='ssl-general-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field()
             ."<input type='hidden' name='action' value='{$general_action}'>"
             ."<div class='ssl-card__body ssl-card__body--compact ssl-general-grid'>"
-            ."  <label><span>מרווח בין בדיקות רציפות (שניות)</span><input type='number' name='manual_interval' min='1' step='1' max='".esc_attr(DAY_IN_SECONDS)."' value='".esc_attr($manual_interval)."'></label>"
-            ."  <label><span>Default Gateway לבדיקות</span><input type='text' name='default_gateway' placeholder='10.0.0.1 / ISP' value='".esc_attr($default_gateway_value)."'></label>"
             ."  <label><span>ימים להתראת תפוגה</span><input type='number' name='expiry_alert_days' min='1' max='365' value='".esc_attr($expiry_alert_days)."'></label>"
-            ."  <label><span>שרת SMTP</span><input type='text' name='smtp_host' placeholder='smtp.example.com' value='".esc_attr($smtp_host_value)."'></label>"
-            ."  <label><span>שם משתמש SMTP</span><input type='text' name='smtp_username' value='".esc_attr($smtp_username_value)."'></label>"
-            ."  <label><span>סיסמה</span><input type='password' name='smtp_password' value='".esc_attr($smtp_password_value)."' autocomplete='new-password'></label>"
-            ."  <label><span>פורט</span><input type='number' name='smtp_port' min='1' max='65535' value='".esc_attr($smtp_port_value)."'></label>"
-            ."  <label><span>הצפנה</span><select name='smtp_encryption'><option value=''".selected($smtp_encryption_value,'',false).">ללא</option><option value='ssl'".selected($smtp_encryption_value,'ssl',false).">SSL</option><option value='tls'".selected($smtp_encryption_value,'tls',false).">TLS</option></select></label>"
-            ."  <label><span>כתובת שולח</span><input type='email' name='smtp_from' placeholder='alerts@example.com' value='".esc_attr($smtp_from_value)."'></label>"
-            ."  <label><span>שם שולח</span><input type='text' name='smtp_from_name' placeholder='SSL Monitor' value='".esc_attr($smtp_from_name_value)."'></label>"
             ."  <label class='ssl-toggle'><input type='checkbox' name='log_file_enabled' value='1'".checked($log_file_enabled_value,true,false)."> הפעל רישום לקובץ לוג של התוסף</label>"
             ."  <input type='hidden' name='monitor_email' value='".esc_attr($monitor_email_value)."'>"
             ."</div>";
@@ -4158,7 +4173,27 @@ JS;
         echo "</form>";
         echo "</div>";
 
-        echo "<div class='ssl-card ssl-card--form ssl-card--token-create'>";
+        echo "<div class='ssl-card ssl-card--form ssl-card--mail'>";
+        echo "<div class='ssl-card__header'><h3>הגדרות דואר</h3></div>";
+        echo "<form id='ssl-mail-form' class='ssl-general-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field()
+            ."<input type='hidden' name='action' value='{$general_action}'>"
+            ."<div class='ssl-card__body ssl-card__body--compact ssl-general-grid'>"
+            ."  <label><span>שרת SMTP</span><input type='text' name='smtp_host' placeholder='smtp.example.com' value='".esc_attr($smtp_host_value)."'></label>"
+            ."  <label><span>שם משתמש SMTP</span><input type='text' name='smtp_username' value='".esc_attr($smtp_username_value)."'></label>"
+            ."  <label><span>סיסמה</span><input type='password' name='smtp_password' value='".esc_attr($smtp_password_value)."' autocomplete='new-password'></label>"
+            ."  <label><span>פורט</span><input type='number' name='smtp_port' min='1' max='65535' value='".esc_attr($smtp_port_value)."'></label>"
+            ."  <label><span>הצפנה</span><select name='smtp_encryption'><option value=''".selected($smtp_encryption_value,'',false).">ללא</option><option value='ssl'".selected($smtp_encryption_value,'ssl',false).">SSL</option><option value='tls'".selected($smtp_encryption_value,'tls',false).">TLS</option></select></label>"
+            ."  <label><span>כתובת שולח</span><input type='email' name='smtp_from' placeholder='alerts@example.com' value='".esc_attr($smtp_from_value)."'></label>"
+            ."  <label><span>שם שולח</span><input type='text' name='smtp_from_name' placeholder='SSL Monitor' value='".esc_attr($smtp_from_name_value)."'></label>"
+            ."</div>";
+        echo "<div class='ssl-card__footer'><button class='ssl-btn ssl-btn-primary' type='submit'>שמור הגדרות דואר</button><span class='ssl-note'>שדות אלו משמשים לשליחת התראות מהתוסף.</span></div>";
+        echo "</form>";
+        echo "</div>";
+        echo "</div>";
+
+        echo "<div class='ssl-card ssl-card--form ssl-card--tokens'>";
+        echo "<div class='ssl-card__header'><h3>ניהול טוקנים</h3></div>";
+        echo "<div class='ssl-card__body'>";
         echo "<form class='ssl-token-create' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field().""
                 ."<input type='hidden' name='action' value='{$add_action}'>"
                 ."<div class='ssl-token-create__fields'>"
@@ -4167,19 +4202,6 @@ JS;
                 ."</div>"
                 ."<p class='ssl-note'>הוסיפו טוקנים לפי הצורך והשתמשו בערך שלהם בבקשות מרוחקות.</p>"
               ."</form>";
-        echo "</div>";
-        echo "</div>";
-
-        $forms = '';
-        foreach($tokens as $token){
-            $form_id = 'ssl-token-manage-'.sanitize_key($token['id']);
-            $forms .= "<form id='".esc_attr($form_id)."' class='ssl-token-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field().""
-                    ."<input type='hidden' name='action' value='{$manage_action}'>"
-                    ."<input type='hidden' name='token_id' value='".esc_attr($token['id'])."'>"
-                 ."</form>";
-        }
-        echo $forms;
-
         echo "<div class='ssl-table-scroll ssl-table-scroll--tokens'>";
         echo "<table class='ssl-table ssl-token-table'>";
         echo "<thead><tr><th>שם הטוקן</th><th>ערך הטוקן</th><th>סטטוס חיבור</th><th style='width:240px'>פעולות</th></tr></thead>";
@@ -4218,6 +4240,17 @@ JS;
         echo "</table>";
         echo "</div>";
         echo "</div>";
+        echo "</div>";
+
+        $forms = '';
+        foreach($tokens as $token){
+            $form_id = 'ssl-token-manage-'.sanitize_key($token['id']);
+            $forms .= "<form id='".esc_attr($form_id)."' class='ssl-token-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field().""
+                    ."<input type='hidden' name='action' value='{$manage_action}'>"
+                    ."<input type='hidden' name='token_id' value='".esc_attr($token['id'])."'>"
+                 ."</form>";
+        }
+        echo $forms;
         return ob_get_clean();
     }
 
@@ -4660,14 +4693,14 @@ JS;
         $posted_gateway = isset($_POST['default_gateway']) ? sanitize_text_field(wp_unslash($_POST['default_gateway'])) : '';
         $posted_email = isset($_POST['monitor_email']) ? sanitize_email(wp_unslash($_POST['monitor_email'])) : '';
         $expiry_days = isset($_POST['expiry_alert_days']) ? (int)$_POST['expiry_alert_days'] : ($current['expiry_alert_days'] ?? 30);
-        $smtp_host = isset($_POST['smtp_host']) ? sanitize_text_field(wp_unslash($_POST['smtp_host'])) : '';
-        $smtp_username = isset($_POST['smtp_username']) ? sanitize_text_field(wp_unslash($_POST['smtp_username'])) : '';
-        $smtp_password = isset($_POST['smtp_password']) ? wp_strip_all_tags((string)wp_unslash($_POST['smtp_password'])) : '';
-        $smtp_port = isset($_POST['smtp_port']) ? (int)$_POST['smtp_port'] : ($current['smtp_port'] ?? 587);
-        $smtp_encryption = isset($_POST['smtp_encryption']) ? sanitize_text_field(wp_unslash($_POST['smtp_encryption'])) : '';
-        $smtp_from = isset($_POST['smtp_from']) ? sanitize_email(wp_unslash($_POST['smtp_from'])) : '';
-        $smtp_from_name = isset($_POST['smtp_from_name']) ? sanitize_text_field(wp_unslash($_POST['smtp_from_name'])) : '';
-        $log_file_enabled = !empty($_POST['log_file_enabled']) ? 1 : 0;
+        $smtp_host = array_key_exists('smtp_host', $_POST) ? sanitize_text_field(wp_unslash($_POST['smtp_host'])) : ($current['smtp_host'] ?? '');
+        $smtp_username = array_key_exists('smtp_username', $_POST) ? sanitize_text_field(wp_unslash($_POST['smtp_username'])) : ($current['smtp_username'] ?? '');
+        $smtp_password = array_key_exists('smtp_password', $_POST) ? wp_strip_all_tags((string)wp_unslash($_POST['smtp_password'])) : ($current['smtp_password'] ?? '');
+        $smtp_port = array_key_exists('smtp_port', $_POST) ? (int)$_POST['smtp_port'] : ($current['smtp_port'] ?? 587);
+        $smtp_encryption = array_key_exists('smtp_encryption', $_POST) ? sanitize_text_field(wp_unslash($_POST['smtp_encryption'])) : ($current['smtp_encryption'] ?? '');
+        $smtp_from = array_key_exists('smtp_from', $_POST) ? sanitize_email(wp_unslash($_POST['smtp_from'])) : ($current['smtp_from'] ?? '');
+        $smtp_from_name = array_key_exists('smtp_from_name', $_POST) ? sanitize_text_field(wp_unslash($_POST['smtp_from_name'])) : ($current['smtp_from_name'] ?? '');
+        $log_file_enabled = array_key_exists('log_file_enabled', $_POST) ? (!empty($_POST['log_file_enabled']) ? 1 : 0) : ($current['log_file_enabled'] ?? 0);
         $merged = array_merge($current, [
             'manual_interval' => $posted_interval,
             'default_gateway' => $posted_gateway,
@@ -5294,30 +5327,52 @@ JS;
         if(!is_array($state)){
             $state = [];
         }
-        $window = 600;
-        $has_contact = $this->has_recent_agent_contact($window);
+        $window = self::TOKEN_STALE_WINDOW;
         $emails = $this->get_monitor_emails();
         $now = time();
         $last_status = isset($state['status']) ? $state['status'] : 'unknown';
         $last_notice = isset($state['last_notice']) ? (int)$state['last_notice'] : 0;
-        if(!$has_contact){
-            $should_notify = ($last_status !== 'down') || (($now - $last_notice) > HOUR_IN_SECONDS);
-            if($should_notify){
-                if(!empty($emails) && function_exists('wp_mail')){
-                    $gateway = $this->get_default_gateway_label();
-                    $subject = sprintf('התראת חיבור סוכן SSL - %s', wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES));
-                    $body = "שלום,\n\nלא זוהתה תקשורת פעילה מול סוכן ה-SSL במהלך \"בדיקה חיה\".\nאתר: " . home_url('/') . "\nזמן: " . date_i18n('d.m.Y H:i') . "\nחלון בדיקה: " . ($window/60) . " דקות\nGateway: " . ($gateway ? $gateway : 'לא הוגדר') . "\n\nהמערכת תמשיך לנסות להתחבר אחת ל-5 דקות.";
-                    foreach($emails as $email){
-                        wp_mail($email, $subject, $body);
-                    }
+        $token_notices = isset($state['token_notices']) && is_array($state['token_notices']) ? $state['token_notices'] : [];
+        $stale_tokens = $this->get_stale_tokens($window);
+        if(!empty($stale_tokens)){
+            $notify_tokens = [];
+            foreach($stale_tokens as $token){
+                $token_id = isset($token['id']) ? $token['id'] : '';
+                $last_for_token = isset($token_notices[$token_id]) ? (int)$token_notices[$token_id] : 0;
+                if(($now - $last_for_token) > HOUR_IN_SECONDS){
+                    $notify_tokens[] = $token;
+                    $token_notices[$token_id] = $now;
                 }
-                $this->log_activity('ניטור חיבור: לא זוהתה תקשורת מהסוכן', [
-                    'window_seconds' => $window,
-                    'monitor_email' => implode(',', $emails),
-                ], 'warning');
-                $state['last_notice'] = $now;
             }
+            $should_notify = ($last_status !== 'down') || (($now - $last_notice) > HOUR_IN_SECONDS) || !empty($notify_tokens);
+            if($should_notify && !empty($emails) && function_exists('wp_mail')){
+                $names = [];
+                foreach($stale_tokens as $token){
+                    $name = isset($token['name']) ? $token['name'] : 'טוקן ללא שם';
+                    $last_seen = !empty($token['last_seen']) ? date_i18n('d.m.Y H:i', (int)$token['last_seen']) : 'לא התקבל חיבור';
+                    $names[] = sprintf('%s (אחרון: %s)', $name, $last_seen);
+                }
+                $subject = sprintf('התראת חיבור טוקן SSL - %s', wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES));
+                $body = "שלום,\n\nלא זוהתה תקשורת עם הטוקנים הבאים במהלך חלון של 5 דקות:\n- " . implode("\n- ", $names) . "\n\nהמערכת תמשיך לנסות להתחבר אחת ל-5 דקות ולשלוח התראה אם התקלה נמשכת.";
+                foreach($emails as $email){
+                    wp_mail($email, $subject, $body);
+                }
+            }
+            $this->log_activity('ניטור חיבור: טוקנים לא זמינים', [
+                'window_seconds' => $window,
+                'monitor_email' => implode(',', $emails),
+                'token_names' => array_map(function($token){ return $token['name'] ?? ''; }, $stale_tokens),
+            ], 'warning');
+            $state['last_notice'] = $now;
             $state['status'] = 'down';
+            $state['token_notices'] = $token_notices;
+            $state['down_tokens'] = array_map(function($token){
+                return [
+                    'id' => $token['id'] ?? '',
+                    'name' => $token['name'] ?? '',
+                    'last_seen' => $token['last_seen'] ?? 0,
+                ];
+            }, $stale_tokens);
             update_option(self::OPTION_MONITOR_STATE, $state, false);
             return;
         }
@@ -5329,6 +5384,8 @@ JS;
         }
         $state['status'] = 'up';
         $state['last_notice'] = $now;
+        $state['token_notices'] = $token_notices;
+        $state['down_tokens'] = [];
         update_option(self::OPTION_MONITOR_STATE, $state, false);
     }
     private function next_midnight_gmt(){
