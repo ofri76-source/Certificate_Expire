@@ -456,6 +456,7 @@ class SSL_Expiry_Manager_AIO {
             'orderby' => 'expiry_ts',
             'order' => 'ASC',
             'missing_only' => false,
+            'status_bucket' => '',
             'filter_client' => '',
             'filter_site' => '',
             'filter_cn' => '',
@@ -485,6 +486,25 @@ class SSL_Expiry_Manager_AIO {
         }
         if(!empty($args['missing_only'])){
             $where[] = "(expiry_ts IS NULL OR expiry_ts = 0)";
+        }
+        $status_bucket = sanitize_key($args['status_bucket']);
+        if($status_bucket !== ''){
+            $now = current_time('timestamp');
+            $thirty_days = $now + (30 * DAY_IN_SECONDS);
+            $ninety_days = $now + (90 * DAY_IN_SECONDS);
+            if($status_bucket === 'grey'){
+                $where[] = "(expiry_ts IS NULL OR expiry_ts = 0)";
+            } elseif($status_bucket === 'red'){
+                $where[] = "(expiry_ts IS NOT NULL AND expiry_ts <= %d)";
+                $params[] = $thirty_days;
+            } elseif($status_bucket === 'yellow'){
+                $where[] = "(expiry_ts IS NOT NULL AND expiry_ts > %d AND expiry_ts <= %d)";
+                $params[] = $thirty_days;
+                $params[] = $ninety_days;
+            } elseif($status_bucket === 'green'){
+                $where[] = "(expiry_ts IS NOT NULL AND expiry_ts > %d)";
+                $params[] = $ninety_days;
+            }
         }
         if($args['filter_client'] !== ''){
             $search = '%' . $wpdb->esc_like($args['filter_client']) . '%';
@@ -888,7 +908,9 @@ class SSL_Expiry_Manager_AIO {
 .ssl-inline-form{display:inline-flex;margin:0;}
 .ssl-inline-form .ssl-btn{white-space:nowrap;}
 .ssl-status-bubbles{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0 4px;}
-.ssl-status-bubble{flex:1 1 160px;min-width:140px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:.65rem .8rem;display:flex;flex-direction:column;gap:4px;box-shadow:0 6px 16px rgba(15,23,42,.05);}
+.ssl-status-bubble{flex:1 1 160px;min-width:140px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:.65rem .8rem;display:flex;flex-direction:column;gap:4px;box-shadow:0 6px 16px rgba(15,23,42,.05);cursor:pointer;text-align:right;appearance:none;-webkit-appearance:none;}
+.ssl-status-bubble.is-active{box-shadow:0 10px 22px rgba(0,0,0,.08);border-color:#94a3b8;transform:translateY(-1px);}
+.ssl-status-bubble:focus-visible{outline:2px solid #2563eb;outline-offset:2px;}
 .ssl-status-bubble__label{font-size:.8rem;font-weight:600;color:#475569;}
 .ssl-status-bubble__value{font-size:1.35rem;font-weight:700;color:#0f172a;}
 .ssl-status-bubble__description{font-size:.78rem;color:#64748b;}
@@ -900,7 +922,8 @@ class SSL_Expiry_Manager_AIO {
 .ssl-status-bubble--green .ssl-status-bubble__value{color:#15803d;}
 .ssl-status-bubble--grey{background:#f1f5f9;border-color:#e2e8f0;}
 .ssl-status-bubble--grey .ssl-status-bubble__value{color:#475569;}
-.ssl-total-row{margin:0 0 8px 0;padding:10px 14px;border-radius:12px;background:#eef2ff;color:#0f172a;font-weight:600;border:1px solid #cbd5f5;display:flex;justify-content:flex-start;gap:8px;box-shadow:inset 0 1px 0 rgba(255,255,255,.65);}
+.ssl-total-row{margin:0 0 8px 0;padding:10px 14px;border-radius:12px;background:#eef2ff;color:#0f172a;font-weight:600;border:1px solid #cbd5f5;display:flex;justify-content:flex-start;gap:8px;box-shadow:inset 0 1px 0 rgba(255,255,255,.65);cursor:pointer;text-align:right;appearance:none;-webkit-appearance:none;}
+.ssl-total-row:focus-visible{outline:2px solid #2563eb;outline-offset:2px;}
 .ssl-total-row strong{font-size:1.05rem;}
 .ssl-total-row__details{font-weight:500;color:#475569;font-size:.95rem;}
 .ssl-alert{margin:12px 0;padding:.65rem 1rem;border-radius:10px;font-size:.9rem;font-weight:600;}
@@ -1696,6 +1719,7 @@ window.addEventListener('DOMContentLoaded',function(){
       debounceTimer = setTimeout(submitForm, 400);
     };
     var searchInput = form.querySelector('[data-ssl-filter-search]');
+    var statusInput = form.querySelector('[data-ssl-status-input]');
     if(searchInput){
       searchInput.addEventListener('input', scheduleSubmit);
     }
@@ -1713,33 +1737,43 @@ window.addEventListener('DOMContentLoaded',function(){
     form.querySelectorAll('[data-ssl-filter-select]').forEach(function(select){
       select.addEventListener('change', submitForm);
     });
-    var missingInput = form.querySelector('[data-ssl-missing-input]');
-    var missingButtons = document.querySelectorAll('[data-ssl-filter-missing]');
-    var resetButtons = document.querySelectorAll('[data-ssl-filter-reset]');
-    var updateMissingState = function(btn){
-      if(!btn || !missingInput){ return; }
-      if(missingInput.value === '1'){ btn.classList.add('is-active'); }
-      else { btn.classList.remove('is-active'); }
+    var statusButtons = document.querySelectorAll('[data-ssl-status-filter]');
+    var statusResetters = document.querySelectorAll('[data-ssl-status-reset]');
+    var allowedStatuses = ['red','yellow','green','grey'];
+    var updateStatusButtons = function(active){
+      statusButtons.forEach(function(btn){
+        var value = btn.getAttribute('data-ssl-status-filter');
+        var isActive = value && value === active;
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
     };
-    missingButtons.forEach(function(btn){
-      updateMissingState(btn);
+    updateStatusButtons(statusInput ? statusInput.value : '');
+    var setStatusAndSubmit = function(next){
+      var target = '';
+      if(allowedStatuses.indexOf(next) !== -1){
+        target = next;
+      }
+      if(statusInput){
+        statusInput.value = target;
+      }
+      var pageReset = form.querySelector('input[name="ssl_page"]');
+      if(pageReset){ pageReset.value = '1'; }
+      updateStatusButtons(target);
+      submitForm();
+    };
+    statusButtons.forEach(function(btn){
       btn.addEventListener('click', function(){
-        if(!missingInput){ return; }
-        missingInput.value = missingInput.value === '1' ? '' : '1';
-        var pageReset = form.querySelector('input[name="ssl_page"]');
-        if(pageReset){ pageReset.value = '1'; }
-        updateMissingState(btn);
-        submitForm();
+        var value = btn.getAttribute('data-ssl-status-filter') || '';
+        var current = statusInput ? statusInput.value : '';
+        var next = (value === current) ? '' : value;
+        setStatusAndSubmit(next);
       });
     });
-    resetButtons.forEach(function(btn){
+    statusResetters.forEach(function(btn){
       btn.addEventListener('click', function(){
-        if(missingInput){ missingInput.value = ''; }
         if(searchInput){ searchInput.value = ''; }
-        var pageReset = form.querySelector('input[name="ssl_page"]');
-        if(pageReset){ pageReset.value = '1'; }
-        missingButtons.forEach(updateMissingState);
-        submitForm();
+        setStatusAndSubmit('');
       });
     });
   });
@@ -3329,12 +3363,21 @@ JS;
         $sort = isset($preserved_query['ssl_sort']) ? sanitize_key($preserved_query['ssl_sort']) : 'expiry_ts';
         $order = isset($preserved_query['ssl_order']) && strtolower($preserved_query['ssl_order']) === 'desc' ? 'DESC' : 'ASC';
         $search = $preserved_query['ssl_search'] ?? '';
-        $missing_only = !empty($preserved_query['ssl_missing']);
         unset($preserved_query['ssl_single'], $preserved_query['ssl_single_error'], $preserved_query['ssl_error']);
         $group_mode = 'cn';
         $preserved_query['ssl_group'] = 'cn';
         $general_settings = $this->get_general_settings();
         $token_alert_seconds = isset($general_settings['token_alert_initial_seconds']) ? max(60, (int)$general_settings['token_alert_initial_seconds']) : 300;
+        $allowed_status_filters = ['red','yellow','green','grey'];
+        $status_bucket = isset($preserved_query['ssl_status']) ? sanitize_key($preserved_query['ssl_status']) : '';
+        if(!in_array($status_bucket, $allowed_status_filters, true)){
+            $status_bucket = '';
+        }
+        $missing_only = !empty($preserved_query['ssl_missing']);
+        if($status_bucket === 'grey'){
+            $missing_only = true;
+        }
+
         $table_data = $this->fetch_certificates([
             'page' => $current_page,
             'per_page' => $requested_per_page,
@@ -3342,6 +3385,7 @@ JS;
             'orderby' => $sort,
             'order' => $order,
             'missing_only' => $missing_only,
+            'status_bucket' => $status_bucket,
         ]);
         $rows = $table_data['rows'];
         $total_found = $table_data['total'];
@@ -3456,20 +3500,23 @@ JS;
             $label = esc_html($bubble['label']);
             $desc = esc_html($bubble['description']);
             $class = esc_attr($bubble['class']);
-            echo "<div class='ssl-status-bubble {$class}'>";
+            $is_active = $status_bucket === $key;
+            $active_class = $is_active ? ' is-active' : '';
+            $pressed_attr = $is_active ? " aria-pressed='true'" : " aria-pressed='false'";
+            echo "<button type='button' class='ssl-status-bubble {$class}{$active_class}' data-ssl-status-filter='".esc_attr($key)."'{$pressed_attr}>";
             echo "<span class='ssl-status-bubble__label'>{$label}</span>";
             echo "<span class='ssl-status-bubble__value'>{$formatted}</span>";
             echo "<span class='ssl-status-bubble__description'>{$desc}</span>";
-            echo "</div>";
+            echo "</button>";
         }
         echo "</div>";
         $total_row_display = sprintf(
-            'סה\"כ רשומות: <strong>%1$s</strong> <span class="ssl-total-row__details">(מוצגות כעת: %2$s, הגדרת דף: %3$s)</span>',
+            'סה"כ רשומות: <strong>%1$s</strong> <span class="ssl-total-row__details">(מוצגות כעת: %2$s, הגדרת דף: %3$s)</span>',
             esc_html(number_format_i18n($bubble_total)),
             esc_html(number_format_i18n($current_page_total)),
             esc_html(number_format_i18n($requested_per_page))
         );
-        echo "<div class='ssl-total-row' role='status'>{$total_row_display}</div>";
+        echo "<button type='button' class='ssl-total-row' role='status' data-ssl-status-reset>{$total_row_display}</button>";
         $stale_tokens = $this->get_stale_tokens();
         $token_alert_minutes = ceil($token_alert_seconds / 60);
         if(!empty($stale_tokens)){
@@ -3566,27 +3613,21 @@ JS;
             echo "</div>";
         }
 
-        $missing_button_class = 'ssl-btn ssl-btn-surface';
-        if($missing_only){
-            $missing_button_class .= ' is-active';
-        }
         echo "<div class='ssl-toolbar ssl-toolbar--filters'>";
         echo "  <div class='ssl-toolbar__group ssl-toolbar__group--toggles'>";
         echo "    <button type='button' class='ssl-btn ssl-btn-surface' data-ssl-expand-all>הרחב הכל</button>";
         echo "    <button type='button' class='ssl-btn ssl-btn-surface' data-ssl-collapse-all>כווץ הכל</button>";
-        echo "    <button type='button' class='".esc_attr($missing_button_class)."' data-ssl-filter-missing>חוסרים</button>";
-        echo "    <button type='button' class='ssl-btn ssl-btn-surface' data-ssl-filter-reset>הצג כל</button>";
         echo "  </div>";
         echo "  <form class='ssl-toolbar__group' method='get' data-ssl-filter-form>";
         foreach($preserved_query as $key => $value){
-            if(in_array($key, ['ssl_search','ssl_page','ssl_group','ssl_missing'], true)){
+            if(in_array($key, ['ssl_search','ssl_page','ssl_group','ssl_missing','ssl_status'], true)){
                 continue;
             }
             echo "<input type='hidden' name='".esc_attr($key)."' value='".esc_attr($value)."'>";
         }
         echo "    <input type='hidden' name='ssl_page' value='1'>";
         echo "    <input type='hidden' name='ssl_group' value='cn'>";
-        echo "    <input type='hidden' name='ssl_missing' value='".($missing_only ? '1' : '')."' data-ssl-missing-input>";
+        echo "    <input type='hidden' name='ssl_status' value='".esc_attr($status_bucket)."' data-ssl-status-input>";
         echo "    <label>חיפוש<input type='search' name='ssl_search' value='".esc_attr($search)."' placeholder='חפש לקוח, דומיין או CN' data-ssl-filter-search></label>";
         echo "    <button type='button' class='ssl-btn ssl-btn-ghost ssl-btn-icon' data-ssl-filter-clear aria-label='נקה חיפוש'>✕</button>";
         echo "  </form>";
