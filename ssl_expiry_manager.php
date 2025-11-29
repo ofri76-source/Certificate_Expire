@@ -6,20 +6,8 @@
  * Author: Ofri + GPT
  */
  
-add_filter( 'rest_authentication_errors', function( $result, $server, $request ) {
-    $route = $request->get_route();
-
-    // Allow REST access for our agent only
-    if ( strpos( $route, 'ssl-agent/v1' ) !== false ) {
-        return null;
-    }
-
-    // Default behavior for the rest of WordPress
-    return $result;
-}, 0, 3 );
-
-add_filter('rest_authentication_errors', function($result, $server = null, $request = null){
-    $route = $request instanceof WP_REST_Request ? $request->get_route() : ($_GET['rest_route'] ?? ($_SERVER['REQUEST_URI'] ?? ''));
+ add_filter('rest_authentication_errors', function($result){
+    $route = $_GET['rest_route'] ?? ($_SERVER['REQUEST_URI'] ?? '');
     if (strpos($route, '/ssl-agent/v1/') === false) return $result;
 
     $hdr = $_SERVER['HTTP_X_AGENT_TOKEN'] ?? '';
@@ -72,12 +60,13 @@ class SSL_Expiry_Manager_AIO {
     const TABLE_AGENTS = 'ssl_agents';
     const QUEUE_CLAIM_TTL = 300; // 5 minutes
     const QUEUE_MAX_ATTEMPTS = 5;
-    const TOKEN_STALE_WINDOW = 600; // 10 minutes
+    const TOKEN_STALE_WINDOW = 300; // 5 minutes
     const LOG_FILE_NAME = 'ssl_em_debug.log';
     const ADD_TOKEN_ACTION    = 'ssl_add_token';
     const MANAGE_TOKEN_ACTION = 'ssl_manage_token';
     const SAVE_CERT_TYPES_ACTION = 'ssl_save_cert_types';
     const SAVE_GENERAL_SETTINGS_ACTION = 'ssl_save_general_settings';
+    const SEND_TEST_EMAIL_ACTION = 'ssl_send_test_email';
     const TOGGLE_FOLLOW_UP_ACTION = 'ssl_toggle_follow_up';
     const PAGE_MAIN_FALLBACK  = 'https://kb.macomp.co.il/?page_id=13576';
     const PAGE_TRASH_FALLBACK = 'https://kb.macomp.co.il/?page_id=11134';
@@ -127,6 +116,8 @@ class SSL_Expiry_Manager_AIO {
         add_action('admin_post_'.self::SAVE_CERT_TYPES_ACTION,        [$this,'handle_save_cert_types']);
         add_action('admin_post_nopriv_'.self::SAVE_GENERAL_SETTINGS_ACTION, [$this,'handle_save_general_settings']);
         add_action('admin_post_'.self::SAVE_GENERAL_SETTINGS_ACTION,        [$this,'handle_save_general_settings']);
+        add_action('admin_post_nopriv_'.self::SEND_TEST_EMAIL_ACTION, [$this,'handle_send_test_email']);
+        add_action('admin_post_'.self::SEND_TEST_EMAIL_ACTION,        [$this,'handle_send_test_email']);
         add_action('admin_post_nopriv_'.self::TOGGLE_FOLLOW_UP_ACTION, [$this,'handle_toggle_follow_up']);
         add_action('admin_post_'.self::TOGGLE_FOLLOW_UP_ACTION,        [$this,'handle_toggle_follow_up']);
         add_action('admin_post_ssl_save_remote_client',            [$this,'handle_save_remote_client']);
@@ -145,6 +136,8 @@ class SSL_Expiry_Manager_AIO {
         add_action('init', [$this,'ensure_cert_type_store']);
         add_action('init', [$this,'ensure_general_settings_store']);
         add_action('init', [$this,'maybe_seed_sql_table']);
+
+        add_action('wp_mail_failed', [$this,'handle_mail_failure']);
 
         add_action('rest_api_init', [$this,'register_rest']);
         add_action('admin_menu',    [$this,'settings_page']);
@@ -463,6 +456,7 @@ class SSL_Expiry_Manager_AIO {
             'orderby' => 'expiry_ts',
             'order' => 'ASC',
             'missing_only' => false,
+            'status_bucket' => '',
             'filter_client' => '',
             'filter_site' => '',
             'filter_cn' => '',
@@ -492,6 +486,25 @@ class SSL_Expiry_Manager_AIO {
         }
         if(!empty($args['missing_only'])){
             $where[] = "(expiry_ts IS NULL OR expiry_ts = 0)";
+        }
+        $status_bucket = sanitize_key($args['status_bucket']);
+        if($status_bucket !== ''){
+            $now = current_time('timestamp');
+            $thirty_days = $now + (30 * DAY_IN_SECONDS);
+            $ninety_days = $now + (90 * DAY_IN_SECONDS);
+            if($status_bucket === 'grey'){
+                $where[] = "(expiry_ts IS NULL OR expiry_ts = 0)";
+            } elseif($status_bucket === 'red'){
+                $where[] = "(expiry_ts IS NOT NULL AND expiry_ts <= %d)";
+                $params[] = $thirty_days;
+            } elseif($status_bucket === 'yellow'){
+                $where[] = "(expiry_ts IS NOT NULL AND expiry_ts > %d AND expiry_ts <= %d)";
+                $params[] = $thirty_days;
+                $params[] = $ninety_days;
+            } elseif($status_bucket === 'green'){
+                $where[] = "(expiry_ts IS NOT NULL AND expiry_ts > %d)";
+                $params[] = $ninety_days;
+            }
         }
         if($args['filter_client'] !== ''){
             $search = '%' . $wpdb->esc_like($args['filter_client']) . '%';
@@ -895,7 +908,9 @@ class SSL_Expiry_Manager_AIO {
 .ssl-inline-form{display:inline-flex;margin:0;}
 .ssl-inline-form .ssl-btn{white-space:nowrap;}
 .ssl-status-bubbles{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0 4px;}
-.ssl-status-bubble{flex:1 1 160px;min-width:140px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:.65rem .8rem;display:flex;flex-direction:column;gap:4px;box-shadow:0 6px 16px rgba(15,23,42,.05);}
+.ssl-status-bubble{flex:1 1 160px;min-width:140px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:.65rem .8rem;display:flex;flex-direction:column;gap:4px;box-shadow:0 6px 16px rgba(15,23,42,.05);cursor:pointer;text-align:right;appearance:none;-webkit-appearance:none;}
+.ssl-status-bubble.is-active{box-shadow:0 10px 22px rgba(0,0,0,.08);border-color:#94a3b8;transform:translateY(-1px);}
+.ssl-status-bubble:focus-visible{outline:2px solid #2563eb;outline-offset:2px;}
 .ssl-status-bubble__label{font-size:.8rem;font-weight:600;color:#475569;}
 .ssl-status-bubble__value{font-size:1.35rem;font-weight:700;color:#0f172a;}
 .ssl-status-bubble__description{font-size:.78rem;color:#64748b;}
@@ -907,11 +922,14 @@ class SSL_Expiry_Manager_AIO {
 .ssl-status-bubble--green .ssl-status-bubble__value{color:#15803d;}
 .ssl-status-bubble--grey{background:#f1f5f9;border-color:#e2e8f0;}
 .ssl-status-bubble--grey .ssl-status-bubble__value{color:#475569;}
-.ssl-total-row{margin:0 0 8px 0;padding:10px 14px;border-radius:12px;background:#eef2ff;color:#0f172a;font-weight:600;border:1px solid #cbd5f5;display:flex;justify-content:flex-start;gap:8px;box-shadow:inset 0 1px 0 rgba(255,255,255,.65);}
+.ssl-total-row{margin:0 0 8px 0;padding:10px 14px;border-radius:12px;background:#eef2ff;color:#0f172a;font-weight:600;border:1px solid #cbd5f5;display:flex;justify-content:flex-start;gap:8px;box-shadow:inset 0 1px 0 rgba(255,255,255,.65);cursor:pointer;text-align:right;appearance:none;-webkit-appearance:none;}
+.ssl-total-row:focus-visible{outline:2px solid #2563eb;outline-offset:2px;}
 .ssl-total-row strong{font-size:1.05rem;}
+.ssl-total-row__details{font-weight:500;color:#475569;font-size:.95rem;}
 .ssl-alert{margin:12px 0;padding:.65rem 1rem;border-radius:10px;font-size:.9rem;font-weight:600;}
 .ssl-alert--success{background:#dcfce7;color:#065f46;}
 .ssl-alert--warning{background:#fef3c7;color:#92400e;}
+.ssl-alert--critical{background:#fee2e2;color:#991b1b;border:2px solid #ef4444;font-size:1rem;box-shadow:0 10px 30px rgba(185,28,28,.18);}
 .ssl-toolbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;}
 .ssl-footer-tools{padding-top:16px;border-top:1px solid #e2e8f0;display:flex;flex-direction:column;gap:16px;}
 .ssl-toolbar--bottom{width:100%;}
@@ -1025,6 +1043,8 @@ class SSL_Expiry_Manager_AIO {
 .ssl-card__body{display:grid;gap:12px;}
 .ssl-card__body--compact{grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px 16px;}
 .ssl-general-grid{grid-template-columns:repeat(auto-fit,minmax(260px,1fr));}
+.ssl-general-grid--monitor{grid-template-columns:repeat(auto-fit,minmax(240px,1fr));}
+.ssl-general-grid__full{grid-column:1/-1;}
 .ssl-card__body--compact label{margin:0;}
 .ssl-card__body--compact .ssl-form-span-2{grid-column:span 2;}
 .ssl-manager--compact .ssl-card__body--compact{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));}
@@ -1047,6 +1067,7 @@ class SSL_Expiry_Manager_AIO {
 .ssl-card--links .ssl-card__footer{padding:0;}
 .ssl-card__footer--links{justify-content:flex-start;}
 .ssl-card__footer{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:flex-start;}
+.ssl-card__footer-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .ssl-form-warning{display:block;color:#b91c1c;font-size:.8rem;margin-top:4px;}
 .ssl-checkbox--inline{display:inline-flex;align-items:center;gap:6px;font-weight:600;white-space:nowrap;}
 .ssl-checkbox--inline input{margin:0;}
@@ -1118,19 +1139,19 @@ class SSL_Expiry_Manager_AIO {
 .ssl-token-note{margin-top:12px;}
 .ssl-card--types .ssl-card__header{display:flex;justify-content:space-between;align-items:center;gap:12px;}
 .ssl-card--types .ssl-card__header h3{margin:0;}
-.ssl-card--types .ssl-card__body{overflow-x:auto;}
-.ssl-type-table{border:1px solid #e2e8f0;border-radius:12px;box-shadow:none;}
-.ssl-type-table thead th{background:#f8fafc;font-size:.8rem;padding:8px 10px;border-bottom:1px solid #e2e8f0;}
-.ssl-type-table tbody td{padding:8px 10px;font-size:.85rem;border-bottom:1px solid #e2e8f0;}
-.ssl-type-table tbody tr:nth-child(even){background:#fff;}
-.ssl-type-table tbody tr:last-child td{border-bottom:none;}
-.ssl-type-table__color{display:flex;align-items:center;gap:10px;}
+.ssl-card--types .ssl-card__body{overflow-x:visible;}
+.ssl-type-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px 14px;align-items:start;}
+.ssl-type-grid__item{border:1px solid #e2e8f0;border-radius:12px;padding:10px;background:#fff;box-shadow:0 4px 10px rgba(15,23,42,.04);display:flex;flex-direction:column;gap:8px;}
+.ssl-type-grid__fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:center;}
+.ssl-type-grid__item label{display:flex;flex-direction:column;gap:4px;font-weight:600;color:#0f172a;font-size:.85rem;}
+.ssl-type-grid__item input[type=text]{width:100%;font-size:.9rem;padding:.3rem .45rem;border-radius:8px;border:1px solid #cbd5f5;background:#f8fafc;min-height:36px;}
+.ssl-type-grid__item input[type=color]{width:42px;height:32px;border:1px solid #cbd5f5;border-radius:8px;background:#fff;cursor:pointer;padding:0;}
+.ssl-type-grid__color-picker{display:flex;align-items:center;gap:10px;}
 .ssl-type-chip-preview{width:18px;height:18px;border-radius:999px;background:var(--ssl-type-color,#2563eb);box-shadow:0 2px 6px rgba(37,99,235,.25);border:1px solid rgba(15,23,42,.08);}
-.ssl-type-form input[type=color]{width:36px;height:26px;border:1px solid #cbd5f5;border-radius:6px;background:#fff;cursor:pointer;padding:0;}
-.ssl-type-form input[type=text]{width:100%;font-size:.9rem;padding:.35rem .5rem;border-radius:8px;border:1px solid #cbd5f5;background:#f8fafc;}
-.ssl-type-table__actions{display:flex;justify-content:flex-end;align-items:center;}
+.ssl-type-grid__actions{display:flex;justify-content:flex-end;}
 .ssl-type-remove{background:transparent;border:none;color:#e53935;font-weight:600;font-size:.85rem;cursor:pointer;padding:0;}
 .ssl-type-remove:hover{text-decoration:underline;}
+.ssl-toggle{display:flex;align-items:center;gap:8px;font-weight:700;color:#0f172a;}
 .ssl-table__edit-row td{background:#f8fafc;}
 .ssl-empty{text-align:center;padding:24px;font-size:1rem;color:#64748b;}
 @media (max-width:640px){
@@ -1148,12 +1169,21 @@ class SSL_Expiry_Manager_AIO {
 }
 .ssl-management-cell{white-space:nowrap;font-weight:700;color:#0f172a;}
 .ssl-bulk-editor__filter-form{margin-bottom:8px;}
+.ssl-bulk-grid__wrapper{width:100%;overflow-x:auto;overflow-y:hidden;padding-bottom:8px;}
+.ssl-bulk-grid{min-width:2200px;}
 .ssl-bulk-grid thead th{position:sticky;top:0;background:#f8fafc;}
 .ssl-bulk-grid__filters-row input,.ssl-bulk-grid__filters-row select{width:100%;padding:.35rem .45rem;border:1px solid #cbd5f5;border-radius:8px;background:#fff;font-size:.85rem;}
 .ssl-bulk-grid__per-page{max-width:70px;text-align:center;}
 .ssl-bulk-grid__temporary textarea,.ssl-bulk-grid textarea{width:100%;min-height:36px;resize:vertical;}
+.ssl-bulk-grid input[type=text],.ssl-bulk-grid input[type=date],.ssl-bulk-grid select{min-width:180px;}
+.ssl-bulk-grid textarea{min-width:220px;}
+.ssl-bulk-grid__input-site{min-width:2560px;}
+.ssl-bulk-grid__input-cn{min-width:1600px;}
+.ssl-bulk-grid__input-management{min-width:80px;}
 .ssl-bulk-grid__guide{margin-top:6px;width:100%;}
 .ssl-bulk-grid__actions{white-space:nowrap;}
+.ssl-toolbar__quick{margin-bottom:12px;}
+.ssl-toolbar__quick-actions{display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:999px;padding:10px 14px;box-shadow:0 1px 2px rgba(15,23,42,.08);}
 .ssl-err{color:#b00020;font-size:.85rem;}
 CSS;
         wp_register_style('ssl-expiry-manager', false);
@@ -1614,6 +1644,7 @@ window.addEventListener('DOMContentLoaded',function(){
   document.querySelectorAll('form[data-ssl-bulk-form]').forEach(function(form){
     sslBulkUpdateState(form);
   });
+  var bulkTable = document.querySelector('.ssl-bulk-grid');
   document.querySelectorAll('[data-ssl-form]').forEach(function(row){
     if(!row.hasAttribute('hidden')){
       var id=row.getAttribute('data-ssl-form');
@@ -1688,6 +1719,7 @@ window.addEventListener('DOMContentLoaded',function(){
       debounceTimer = setTimeout(submitForm, 400);
     };
     var searchInput = form.querySelector('[data-ssl-filter-search]');
+    var statusInput = form.querySelector('[data-ssl-status-input]');
     if(searchInput){
       searchInput.addEventListener('input', scheduleSubmit);
     }
@@ -1705,33 +1737,43 @@ window.addEventListener('DOMContentLoaded',function(){
     form.querySelectorAll('[data-ssl-filter-select]').forEach(function(select){
       select.addEventListener('change', submitForm);
     });
-    var missingInput = form.querySelector('[data-ssl-missing-input]');
-    var missingButtons = document.querySelectorAll('[data-ssl-filter-missing]');
-    var resetButtons = document.querySelectorAll('[data-ssl-filter-reset]');
-    var updateMissingState = function(btn){
-      if(!btn || !missingInput){ return; }
-      if(missingInput.value === '1'){ btn.classList.add('is-active'); }
-      else { btn.classList.remove('is-active'); }
+    var statusButtons = document.querySelectorAll('[data-ssl-status-filter]');
+    var statusResetters = document.querySelectorAll('[data-ssl-status-reset]');
+    var allowedStatuses = ['red','yellow','green','grey'];
+    var updateStatusButtons = function(active){
+      statusButtons.forEach(function(btn){
+        var value = btn.getAttribute('data-ssl-status-filter');
+        var isActive = value && value === active;
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
     };
-    missingButtons.forEach(function(btn){
-      updateMissingState(btn);
+    updateStatusButtons(statusInput ? statusInput.value : '');
+    var setStatusAndSubmit = function(next){
+      var target = '';
+      if(allowedStatuses.indexOf(next) !== -1){
+        target = next;
+      }
+      if(statusInput){
+        statusInput.value = target;
+      }
+      var pageReset = form.querySelector('input[name="ssl_page"]');
+      if(pageReset){ pageReset.value = '1'; }
+      updateStatusButtons(target);
+      submitForm();
+    };
+    statusButtons.forEach(function(btn){
       btn.addEventListener('click', function(){
-        if(!missingInput){ return; }
-        missingInput.value = missingInput.value === '1' ? '' : '1';
-        var pageReset = form.querySelector('input[name="ssl_page"]');
-        if(pageReset){ pageReset.value = '1'; }
-        updateMissingState(btn);
-        submitForm();
+        var value = btn.getAttribute('data-ssl-status-filter') || '';
+        var current = statusInput ? statusInput.value : '';
+        var next = (value === current) ? '' : value;
+        setStatusAndSubmit(next);
       });
     });
-    resetButtons.forEach(function(btn){
+    statusResetters.forEach(function(btn){
       btn.addEventListener('click', function(){
-        if(missingInput){ missingInput.value = ''; }
         if(searchInput){ searchInput.value = ''; }
-        var pageReset = form.querySelector('input[name="ssl_page"]');
-        if(pageReset){ pageReset.value = '1'; }
-        missingButtons.forEach(updateMissingState);
-        submitForm();
+        setStatusAndSubmit('');
       });
     });
   });
@@ -2023,7 +2065,10 @@ JS;
             $log = array_slice($log, -200);
         }
         update_option(self::OPTION_LOG, $log, false);
-        $this->append_file_log($entry);
+        $settings = $this->get_general_settings();
+        if(!empty($settings['log_file_enabled'])){
+            $this->append_file_log($entry);
+        }
     }
     private function queue_table_exists(){
         global $wpdb;
@@ -2600,6 +2645,17 @@ JS;
             'default_gateway' => '',
             'expiry_alert_days' => 30,
             'monitor_email' => '',
+            'token_alert_emails' => [],
+            'token_alert_initial_seconds' => 300,
+            'token_alert_repeat_seconds' => 3600,
+            'smtp_host' => '',
+            'smtp_username' => '',
+            'smtp_password' => '',
+            'smtp_port' => 587,
+            'smtp_encryption' => '',
+            'smtp_from' => '',
+            'smtp_from_name' => '',
+            'log_file_enabled' => 1,
         ];
         $settings = wp_parse_args(is_array($settings) ? $settings : [], $defaults);
         $interval = isset($settings['manual_interval']) ? (int)$settings['manual_interval'] : $defaults['manual_interval'];
@@ -2618,11 +2674,68 @@ JS;
             $expiry_days = 365;
         }
         $monitor_email = isset($settings['monitor_email']) ? sanitize_email($settings['monitor_email']) : '';
+        $email_list = [];
+        if(!empty($settings['token_alert_emails'])){
+            $maybe_array = $settings['token_alert_emails'];
+            if(!is_array($maybe_array)){
+                $maybe_array = $this->parse_email_list($maybe_array);
+            }
+            foreach((array)$maybe_array as $email){
+                $clean = sanitize_email($email);
+                if($clean){
+                    $email_list[$clean] = $clean;
+                }
+            }
+        }
+        $initial_seconds = isset($settings['token_alert_initial_seconds']) ? (int)$settings['token_alert_initial_seconds'] : 0;
+        if($initial_seconds <= 0 && isset($settings['token_alert_initial_minutes'])){
+            $initial_seconds = (int)$settings['token_alert_initial_minutes'] * MINUTE_IN_SECONDS;
+        }
+        if($initial_seconds < 60){
+            $initial_seconds = 60;
+        }
+        if($initial_seconds > DAY_IN_SECONDS){
+            $initial_seconds = DAY_IN_SECONDS;
+        }
+        $repeat_seconds = isset($settings['token_alert_repeat_seconds']) ? (int)$settings['token_alert_repeat_seconds'] : 0;
+        if($repeat_seconds <= 0 && isset($settings['token_alert_repeat_minutes'])){
+            $repeat_seconds = (int)$settings['token_alert_repeat_minutes'] * MINUTE_IN_SECONDS;
+        }
+        if($repeat_seconds < 300){
+            $repeat_seconds = 300;
+        }
+        if($repeat_seconds > DAY_IN_SECONDS){
+            $repeat_seconds = DAY_IN_SECONDS;
+        }
+        $smtp_host = isset($settings['smtp_host']) ? sanitize_text_field($settings['smtp_host']) : '';
+        $smtp_username = isset($settings['smtp_username']) ? sanitize_text_field($settings['smtp_username']) : '';
+        $smtp_password = isset($settings['smtp_password']) ? wp_strip_all_tags((string)$settings['smtp_password']) : '';
+        $smtp_port = isset($settings['smtp_port']) ? (int)$settings['smtp_port'] : $defaults['smtp_port'];
+        if($smtp_port < 1){
+            $smtp_port = 1;
+        }
+        $allowed_encryptions = ['','ssl','tls'];
+        $smtp_encryption_raw = isset($settings['smtp_encryption']) ? strtolower((string)$settings['smtp_encryption']) : '';
+        $smtp_encryption = in_array($smtp_encryption_raw, $allowed_encryptions, true) ? $smtp_encryption_raw : '';
+        $smtp_from = isset($settings['smtp_from']) ? sanitize_email($settings['smtp_from']) : '';
+        $smtp_from_name = isset($settings['smtp_from_name']) ? sanitize_text_field($settings['smtp_from_name']) : '';
+        $log_file_enabled = !empty($settings['log_file_enabled']) ? 1 : 0;
         return [
             'manual_interval' => $interval,
             'default_gateway' => $gateway,
             'monitor_email' => $monitor_email,
+            'token_alert_emails' => array_values($email_list),
+            'token_alert_initial_seconds' => $initial_seconds,
+            'token_alert_repeat_seconds' => $repeat_seconds,
             'expiry_alert_days' => $expiry_days,
+            'smtp_host' => $smtp_host,
+            'smtp_username' => $smtp_username,
+            'smtp_password' => $smtp_password,
+            'smtp_port' => $smtp_port,
+            'smtp_encryption' => $smtp_encryption,
+            'smtp_from' => $smtp_from,
+            'smtp_from_name' => $smtp_from_name,
+            'log_file_enabled' => $log_file_enabled,
         ];
     }
     private function get_general_settings(){
@@ -2631,6 +2744,24 @@ JS;
             $settings = [];
         }
         return $this->sanitize_general_settings($settings);
+    }
+
+    private function parse_email_list($raw){
+        $emails = [];
+        if(is_string($raw)){
+            $parts = preg_split('/[\n,;]/', $raw);
+        } elseif(is_array($raw)){
+            $parts = $raw;
+        } else {
+            $parts = [];
+        }
+        foreach($parts as $part){
+            $clean = sanitize_email(trim((string)$part));
+            if($clean){
+                $emails[$clean] = $clean;
+            }
+        }
+        return array_values($emails);
     }
     private function get_manual_batch_interval(){
         $settings = $this->get_general_settings();
@@ -2896,44 +3027,17 @@ JS;
     private function sync_tokens_to_agents($tokens){
         global $wpdb;
         $table = $this->get_agents_table_name();
-        $desired = [];
         foreach((array)$tokens as $token){
-            $token_value = isset($token['token']) ? trim((string)$token['token']) : '';
-            if($token_value === ''){
+            if(empty($token['token'])){
                 continue;
             }
-            $desired[$token_value] = [
-                'name'  => $token['name'] ?? 'Agent',
-                'token' => $token_value,
-            ];
-        }
-
-        $existing_rows = (array)$wpdb->get_results("SELECT id, token FROM {$table}", ARRAY_A);
-        $existing_tokens = [];
-        foreach($existing_rows as $row){
-            $db_token = trim((string)($row['token'] ?? ''));
-            if($db_token === ''){
-                continue;
-            }
-            $existing_tokens[$db_token] = (int)$row['id'];
-        }
-
-        foreach($desired as $token_value => $data){
-            if(isset($existing_tokens[$token_value])){
-                $wpdb->update($table, ['name' => $data['name']], ['id' => $existing_tokens[$token_value]], ['%s'], ['%d']);
-                unset($existing_tokens[$token_value]);
-                continue;
-            }
-            $wpdb->insert($table,[
-                'name'   => $data['name'],
-                'token'  => $token_value,
-                'status' => 'unknown',
-            ]);
-        }
-
-        if(!empty($existing_tokens)){
-            foreach($existing_tokens as $id){
-                $wpdb->delete($table, ['id' => $id], ['%d']);
+            $existing = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE token = %s", $token['token']));
+            if(!$existing){
+                $wpdb->insert($table,[
+                    'name'   => $token['name'] ?? 'Agent',
+                    'token'  => $token['token'],
+                    'status' => 'unknown',
+                ]);
             }
         }
     }
@@ -3089,34 +3193,43 @@ JS;
         $this->update_token_fields($token['id'], ['notified_down_at' => time()]);
     }
 
-    private function has_recent_agent_contact($window_seconds = 600){
+    private function has_recent_agent_contact($window_seconds = self::TOKEN_STALE_WINDOW){
         $cutoff = time() - absint($window_seconds);
-        $ever_connected = false;
         foreach($this->get_tokens() as $token){
-            $last_seen = isset($token['last_seen']) ? (int)$token['last_seen'] : 0;
-            if($last_seen > 0){
-                $ever_connected = true;
-                if($last_seen >= $cutoff){
-                    return true;
-                }
+            if(!empty($token['last_seen']) && (int)$token['last_seen'] >= $cutoff){
+                return true;
             }
         }
         global $wpdb;
         $table = $this->get_agents_table_name();
         $cutoff_mysql = gmdate('Y-m-d H:i:s', $cutoff);
-        $recent_count = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE last_seen IS NOT NULL AND last_seen >= %s", $cutoff_mysql));
-        if($recent_count > 0){
-            return true;
+        $count = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE last_seen IS NOT NULL AND last_seen >= %s", $cutoff_mysql));
+        return (int)$count > 0;
+    }
+
+    private function get_stale_tokens($window_seconds = null){
+        if($window_seconds === null){
+            $settings = $this->get_general_settings();
+            $initial_seconds = isset($settings['token_alert_initial_seconds']) ? (int)$settings['token_alert_initial_seconds'] : self::TOKEN_STALE_WINDOW;
+            if($initial_seconds < 60){
+                $initial_seconds = 60;
+            }
+            if($initial_seconds > DAY_IN_SECONDS){
+                $initial_seconds = DAY_IN_SECONDS;
+            }
+            $window_seconds = $initial_seconds;
+        } else {
+            $window_seconds = (int)$window_seconds;
         }
-
-        $total_seen = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table} WHERE last_seen IS NOT NULL");
-        $ever_connected = $ever_connected || ($total_seen > 0);
-
-        if(!$ever_connected){
-            return true;
+        $cutoff = time() - absint($window_seconds);
+        $stale = [];
+        foreach($this->get_tokens() as $token){
+            $last_seen = isset($token['last_seen']) ? (int)$token['last_seen'] : 0;
+            if($last_seen === 0 || $last_seen < $cutoff){
+                $stale[] = $token;
+            }
         }
-
-        return false;
+        return $stale;
     }
 
     private function collect_token_email_choices(){
@@ -3250,10 +3363,21 @@ JS;
         $sort = isset($preserved_query['ssl_sort']) ? sanitize_key($preserved_query['ssl_sort']) : 'expiry_ts';
         $order = isset($preserved_query['ssl_order']) && strtolower($preserved_query['ssl_order']) === 'desc' ? 'DESC' : 'ASC';
         $search = $preserved_query['ssl_search'] ?? '';
-        $missing_only = !empty($preserved_query['ssl_missing']);
         unset($preserved_query['ssl_single'], $preserved_query['ssl_single_error'], $preserved_query['ssl_error']);
         $group_mode = 'cn';
         $preserved_query['ssl_group'] = 'cn';
+        $general_settings = $this->get_general_settings();
+        $token_alert_seconds = isset($general_settings['token_alert_initial_seconds']) ? max(60, (int)$general_settings['token_alert_initial_seconds']) : 300;
+        $allowed_status_filters = ['red','yellow','green','grey'];
+        $status_bucket = isset($preserved_query['ssl_status']) ? sanitize_key($preserved_query['ssl_status']) : '';
+        if(!in_array($status_bucket, $allowed_status_filters, true)){
+            $status_bucket = '';
+        }
+        $missing_only = !empty($preserved_query['ssl_missing']);
+        if($status_bucket === 'grey'){
+            $missing_only = true;
+        }
+
         $table_data = $this->fetch_certificates([
             'page' => $current_page,
             'per_page' => $requested_per_page,
@@ -3261,6 +3385,7 @@ JS;
             'orderby' => $sort,
             'order' => $order,
             'missing_only' => $missing_only,
+            'status_bucket' => $status_bucket,
         ]);
         $rows = $table_data['rows'];
         $total_found = $table_data['total'];
@@ -3274,6 +3399,13 @@ JS;
         }
         $scope_counts = $this->get_certificate_scope_counts();
         $status_counts = $this->get_certificate_status_counts();
+        $bubble_total = 0;
+        foreach(['red','yellow','green','grey'] as $status_key){
+            $bubble_total += isset($status_counts[$status_key]) ? (int)$status_counts[$status_key] : 0;
+        }
+        if($bubble_total === 0 && $total_found > 0){
+            $bubble_total = (int)$total_found;
+        }
         $total_pages = max(1, (int)ceil($total_found / $requested_per_page));
         $is_create_hidden = empty($_GET['ssl_new']);
         $create_attr = $is_create_hidden ? ' hidden' : '';
@@ -3368,14 +3500,36 @@ JS;
             $label = esc_html($bubble['label']);
             $desc = esc_html($bubble['description']);
             $class = esc_attr($bubble['class']);
-            echo "<div class='ssl-status-bubble {$class}'>";
+            $is_active = $status_bucket === $key;
+            $active_class = $is_active ? ' is-active' : '';
+            $pressed_attr = $is_active ? " aria-pressed='true'" : " aria-pressed='false'";
+            echo "<button type='button' class='ssl-status-bubble {$class}{$active_class}' data-ssl-status-filter='".esc_attr($key)."'{$pressed_attr}>";
             echo "<span class='ssl-status-bubble__label'>{$label}</span>";
             echo "<span class='ssl-status-bubble__value'>{$formatted}</span>";
             echo "<span class='ssl-status-bubble__description'>{$desc}</span>";
-            echo "</div>";
+            echo "</button>";
         }
         echo "</div>";
-        echo "<div class='ssl-total-row' role='status'>סה\"כ רשומות: <strong>".esc_html(number_format_i18n($total_found))."</strong></div>";
+        $total_row_display = sprintf(
+            'סה"כ רשומות: <strong>%1$s</strong> <span class="ssl-total-row__details">(מוצגות כעת: %2$s, הגדרת דף: %3$s)</span>',
+            esc_html(number_format_i18n($bubble_total)),
+            esc_html(number_format_i18n($current_page_total)),
+            esc_html(number_format_i18n($requested_per_page))
+        );
+        echo "<button type='button' class='ssl-total-row' role='status' data-ssl-status-reset>{$total_row_display}</button>";
+        $stale_tokens = $this->get_stale_tokens();
+        $token_alert_minutes = ceil($token_alert_seconds / 60);
+        if(!empty($stale_tokens)){
+            $label_parts = [];
+            foreach($stale_tokens as $token){
+                $name = isset($token['name']) && $token['name'] !== '' ? $token['name'] : 'טוקן ללא שם';
+                $last_seen_label = !empty($token['last_seen']) ? date_i18n('d.m.Y H:i', (int)$token['last_seen']) : 'לא התקבל חיבור';
+                $label_parts[] = esc_html(sprintf('%s (אחרון: %s)', $name, $last_seen_label));
+            }
+            $label_text = implode(', ', $label_parts);
+            $window_label = esc_html($token_alert_minutes);
+            echo "<div class='ssl-alert ssl-alert--critical'>⚠️ החיבור לטוקנים הבאים לא זמין מעל {$window_label} דקות: {$label_text}. נשלחת התראת דוא\"ל ומומלץ לבדוק מיד.</div>";
+        }
         if($single_success_message !== ''){
             echo "<div class='ssl-alert ssl-alert--success'>".esc_html($single_success_message)."</div>";
         } elseif($single_error_message !== ''){
@@ -3459,27 +3613,21 @@ JS;
             echo "</div>";
         }
 
-        $missing_button_class = 'ssl-btn ssl-btn-surface';
-        if($missing_only){
-            $missing_button_class .= ' is-active';
-        }
         echo "<div class='ssl-toolbar ssl-toolbar--filters'>";
         echo "  <div class='ssl-toolbar__group ssl-toolbar__group--toggles'>";
         echo "    <button type='button' class='ssl-btn ssl-btn-surface' data-ssl-expand-all>הרחב הכל</button>";
         echo "    <button type='button' class='ssl-btn ssl-btn-surface' data-ssl-collapse-all>כווץ הכל</button>";
-        echo "    <button type='button' class='".esc_attr($missing_button_class)."' data-ssl-filter-missing>חוסרים</button>";
-        echo "    <button type='button' class='ssl-btn ssl-btn-surface' data-ssl-filter-reset>הצג כל</button>";
         echo "  </div>";
         echo "  <form class='ssl-toolbar__group' method='get' data-ssl-filter-form>";
         foreach($preserved_query as $key => $value){
-            if(in_array($key, ['ssl_search','ssl_page','ssl_group','ssl_missing'], true)){
+            if(in_array($key, ['ssl_search','ssl_page','ssl_group','ssl_missing','ssl_status'], true)){
                 continue;
             }
             echo "<input type='hidden' name='".esc_attr($key)."' value='".esc_attr($value)."'>";
         }
         echo "    <input type='hidden' name='ssl_page' value='1'>";
         echo "    <input type='hidden' name='ssl_group' value='cn'>";
-        echo "    <input type='hidden' name='ssl_missing' value='".($missing_only ? '1' : '')."' data-ssl-missing-input>";
+        echo "    <input type='hidden' name='ssl_status' value='".esc_attr($status_bucket)."' data-ssl-status-input>";
         echo "    <label>חיפוש<input type='search' name='ssl_search' value='".esc_attr($search)."' placeholder='חפש לקוח, דומיין או CN' data-ssl-filter-search></label>";
         echo "    <button type='button' class='ssl-btn ssl-btn-ghost ssl-btn-icon' data-ssl-filter-clear aria-label='נקה חיפוש'>✕</button>";
         echo "  </form>";
@@ -3867,14 +4015,14 @@ JS;
         );
         echo "<div class='ssl-note'>".$note_counts."</div>";
         echo "<div class='ssl-footer-tools'>";
+        echo "  <div class='ssl-toolbar__quick'><div class='ssl-toolbar__quick-actions'>";
+        echo "    <a class='ssl-btn ssl-btn-surface' href='".esc_url(add_query_arg('ssl_new','1'))."'>הוסף רשומה</a>";
+        echo "    <a class='ssl-btn ssl-btn-surface' href='".esc_url($bulk_edit_url)."'>עריכה קבוציתית</a>";
+        echo "    <a class='ssl-btn ssl-btn-surface' href='".esc_url($a['trash_url'])."'>סל מחזור</a>";
+        echo "    <a class='ssl-btn ssl-btn-surface' href='".esc_url($a['token_url'])."'>הגדרות</a>";
+        echo "    <a class='ssl-btn ssl-btn-surface' href='".esc_url($a['logs_url'])."'>לוג פעילות</a>";
+        echo "  </div></div>";
         echo "  <div class='ssl-toolbar ssl-toolbar--bottom'>";
-        echo "    <div class='ssl-toolbar__group'>";
-        echo "      <a class='ssl-btn ssl-btn-surface' href='".esc_url(add_query_arg('ssl_new','1'))."'>הוסף רשומה</a>";
-        echo "      <a class='ssl-btn ssl-btn-surface' href='".esc_url($bulk_edit_url)."'>עריכה קבוציתית</a>";
-        echo "      <a class='ssl-btn ssl-btn-surface' href='".esc_url($a['trash_url'])."'>סל מחזור</a>";
-        echo "      <a class='ssl-btn ssl-btn-surface' href='".esc_url($a['token_url'])."'>הגדרות</a>";
-        echo "      <a class='ssl-btn ssl-btn-surface' href='".esc_url($a['logs_url'])."'>לוג פעילות</a>";
-        echo "    </div>";
         echo "    <div class='ssl-toolbar__group'><a class='ssl-btn ssl-btn-surface' href='{$export_url}'>ייצוא CSV</a>";
         echo "    <a class='ssl-btn ssl-btn-surface' href='{$refresh_url}'>רענון</a>";
         echo "    <button class='ssl-btn ssl-btn-danger' type='submit' form='".esc_attr($bulk_form_id)."' data-ssl-bulk-delete disabled onclick=\"return confirm('למחוק את הרשומות שנבחרו?')\">מחק רשומות נבחרות</button></div>";
@@ -4017,15 +4165,29 @@ JS;
         $manage_action = esc_attr(self::MANAGE_TOKEN_ACTION);
         $types_action  = esc_attr(self::SAVE_CERT_TYPES_ACTION);
         $general_action = esc_attr(self::SAVE_GENERAL_SETTINGS_ACTION);
+        $test_mail_form_id = 'ssl-test-mail-form';
+        $test_mail_action = esc_attr(self::SEND_TEST_EMAIL_ACTION);
         $email_choices = $this->collect_token_email_choices();
         $scheduled_notice = isset($_GET['ssl_batch']) ? max(0, intval($_GET['ssl_batch'])) : 0;
         $batch_error = isset($_GET['ssl_batch_error']);
         $types_updated = isset($_GET['ssl_types']);
         $general_updated = isset($_GET['ssl_general']);
-        $manual_interval = isset($general_settings['manual_interval']) ? max(1, (int)$general_settings['manual_interval']) : 10;
-        $default_gateway_value = isset($general_settings['default_gateway']) ? sanitize_text_field($general_settings['default_gateway']) : '';
         $monitor_email_value = isset($general_settings['monitor_email']) ? sanitize_email($general_settings['monitor_email']) : '';
+        $token_alert_emails_value = '';
+        if(!empty($general_settings['token_alert_emails']) && is_array($general_settings['token_alert_emails'])){
+            $token_alert_emails_value = implode("\n", array_map('sanitize_email', $general_settings['token_alert_emails']));
+        }
+        $token_alert_initial = isset($general_settings['token_alert_initial_seconds']) ? (int)$general_settings['token_alert_initial_seconds'] : 300;
+        $token_alert_repeat = isset($general_settings['token_alert_repeat_seconds']) ? (int)$general_settings['token_alert_repeat_seconds'] : 3600;
         $expiry_alert_days = isset($general_settings['expiry_alert_days']) ? (int)$general_settings['expiry_alert_days'] : 30;
+        $smtp_host_value = isset($general_settings['smtp_host']) ? sanitize_text_field($general_settings['smtp_host']) : '';
+        $smtp_username_value = isset($general_settings['smtp_username']) ? sanitize_text_field($general_settings['smtp_username']) : '';
+        $smtp_password_value = isset($general_settings['smtp_password']) ? (string)$general_settings['smtp_password'] : '';
+        $smtp_port_value = isset($general_settings['smtp_port']) ? (int)$general_settings['smtp_port'] : 587;
+        $smtp_encryption_value = isset($general_settings['smtp_encryption']) ? sanitize_text_field($general_settings['smtp_encryption']) : '';
+        $smtp_from_value = isset($general_settings['smtp_from']) ? sanitize_email($general_settings['smtp_from']) : '';
+        $smtp_from_name_value = isset($general_settings['smtp_from_name']) ? sanitize_text_field($general_settings['smtp_from_name']) : '';
+        $log_file_enabled_value = !empty($general_settings['log_file_enabled']);
         $bulk_edit_url = 'https://kb.macomp.co.il/?page_id=13973';
         ob_start();
         echo "<div class='ssl-manager'>";
@@ -4040,11 +4202,10 @@ JS;
         echo "<a class='ssl-btn ssl-btn-outline' href='".esc_url($a['trash_url'])."'>מעבר לסל מחזור</a>";
         echo "<a class='ssl-btn ssl-btn-outline' href='".esc_url($a['logs_url'])."'>לוג פעילות</a>";
         $batch_form_action = esc_url(admin_url('admin-post.php'));
-        $manual_interval_label = sprintf('בדוק את כל הדומיינים (מרווח %s שניות)', number_format_i18n($manual_interval));
         echo "<form class='ssl-inline-form' method='post' action='{$batch_form_action}'>".$this->nonce_field()
             ."<input type='hidden' name='action' value='".esc_attr(self::BATCH_CHECK_ACTION)."'>"
             ."<input type='hidden' name='redirect_to' value='".esc_attr($a['main_url'])."'>"
-            ."<button class='ssl-btn ssl-btn-primary' type='submit'>".esc_html($manual_interval_label)."</button>"
+            ."<button class='ssl-btn ssl-btn-primary' type='submit'>בדוק את כל הדומיינים</button>"
             ."</form>";
         echo "</div>";
         echo "</div>";
@@ -4053,6 +4214,16 @@ JS;
         }
         if($general_updated){
             echo "<div class='ssl-alert ssl-alert--success'>ההגדרות נשמרו בהצלחה.</div>";
+        }
+        $test_mail_status = isset($_GET['ssl_test_mail']) ? sanitize_key($_GET['ssl_test_mail']) : '';
+        if($test_mail_status === 'sent'){
+            echo "<div class='ssl-alert ssl-alert--success'>נשלחה הודעת בדיקה לכתובות הניטור.</div>";
+        } elseif($test_mail_status === 'failed'){
+            echo "<div class='ssl-alert ssl-alert--warning'>שליחת הודעת הבדיקה נכשלה. בדוק את הגדרות ה-SMTP.</div>";
+        } elseif($test_mail_status === 'no-mailer'){
+            echo "<div class='ssl-alert ssl-alert--warning'>פונקציית הדואר של וורדפרס אינה זמינה בשרת זה.</div>";
+        } elseif($test_mail_status === 'no-recipients'){
+            echo "<div class='ssl-alert ssl-alert--warning'>לא הוגדרו נמענים לניטור הטוקנים ולכן לא נשלחה הודעת בדיקה.</div>";
         }
         if($scheduled_notice > 0){
             $message = sprintf('תוזמנו %s בדיקות רציפות.', number_format_i18n($scheduled_notice));
@@ -4065,25 +4236,28 @@ JS;
         echo "<div class='ssl-card__header'><h3>ניהול סוגי תעודות</h3><button type='button' class='ssl-btn ssl-btn-surface ssl-btn-compact' data-ssl-type-add>הוסף סוג</button></div>";
         echo "<form class='ssl-type-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field()
             ."<input type='hidden' name='action' value='{$types_action}'>"
-            ."<div class='ssl-card__body'>"
-            ."<table class='ssl-table ssl-type-table'><thead><tr><th>שם הסוג</th><th>צבע</th><th>פעולות</th></tr></thead><tbody data-ssl-type-rows>";
+            ."<div class='ssl-card__body ssl-card__body--compact'>"
+            ."<div class='ssl-type-grid' data-ssl-type-rows>";
         foreach($cert_types as $type){
             $type_key = $this->sanitize_cert_type_key($type['key'] ?? '');
             $type_label = isset($type['label']) && $type['label'] !== '' ? $type['label'] : $type_key;
             $type_color = $this->sanitize_cert_type_color($type['color'] ?? '#2563eb');
-            echo "<tr data-ssl-type-row>";
-            echo "<td class='ssl-type-table__name'><input type='text' name='cert_type_label[]' value='".esc_attr($type_label)."' required></td>";
-            echo "<td class='ssl-type-table__color'><span class='ssl-type-chip-preview' data-ssl-type-preview style='--ssl-type-color:".esc_attr($type_color).";'></span><input type='color' name='cert_type_color[]' value='".esc_attr($type_color)."' data-ssl-type-color></td>";
-            echo "<td class='ssl-type-table__actions'><input type='hidden' name='cert_type_key[]' value='".esc_attr($type_key)."'><button type='button' class='ssl-type-remove' data-ssl-type-remove aria-label='הסר סוג'>מחק</button></td>";
-            echo "</tr>";
+            echo "<div class='ssl-type-grid__item' data-ssl-type-row>";
+            echo "<div class='ssl-type-grid__fields'>";
+            echo "<label><span>סוג</span><input type='text' name='cert_type_label[]' value='".esc_attr($type_label)."' required></label>";
+            echo "<label class='ssl-type-grid__color'><span>צבע</span><div class='ssl-type-grid__color-picker'><span class='ssl-type-chip-preview' data-ssl-type-preview style='--ssl-type-color:".esc_attr($type_color).";'></span><input type='color' name='cert_type_color[]' value='".esc_attr($type_color)."' data-ssl-type-color></div></label>";
+            echo "</div>";
+            echo "<div class='ssl-type-grid__actions'><input type='hidden' name='cert_type_key[]' value='".esc_attr($type_key)."'><button type='button' class='ssl-type-remove' data-ssl-type-remove aria-label='הסר סוג'>מחק</button></div>";
+            echo "</div>";
         }
-        echo "</tbody></table>";
+        echo "</div>";
         echo "</div>";
         echo "<div class='ssl-card__footer'><button class='ssl-btn ssl-btn-primary ssl-btn-compact' type='submit'>שמור סוגים</button></div>";
         echo "</form>";
-        echo "<template id='ssl-type-row-template'><tr data-ssl-type-row><td class='ssl-type-table__name'><input type='text' name='cert_type_label[]' required></td><td class='ssl-type-table__color'><span class='ssl-type-chip-preview' data-ssl-type-preview style='--ssl-type-color:#2563eb;'></span><input type='color' name='cert_type_color[]' value='#2563eb' data-ssl-type-color></td><td class='ssl-type-table__actions'><input type='hidden' name='cert_type_key[]' value=''><button type='button' class='ssl-type-remove' data-ssl-type-remove aria-label='הסר סוג'>מחק</button></td></tr></template>";
-        echo "<div class='ssl-note'>הסוגים שנבחרו יוצגו בתווית צבעונית לצד כל רשומה בטבלה הראשית.</div>";
+        echo "<template id='ssl-type-row-template'><div class='ssl-type-grid__item' data-ssl-type-row><div class='ssl-type-grid__fields'><label><span>סוג</span><input type='text' name='cert_type_label[]' required></label><label class='ssl-type-grid__color'><span>צבע</span><div class='ssl-type-grid__color-picker'><span class='ssl-type-chip-preview' data-ssl-type-preview style='--ssl-type-color:#2563eb;'></span><input type='color' name='cert_type_color[]' value='#2563eb' data-ssl-type-color></div></label></div><div class='ssl-type-grid__actions'><input type='hidden' name='cert_type_key[]' value=''><button type='button' class='ssl-type-remove' data-ssl-type-remove aria-label='הסר סוג'>מחק</button></div></div></template>";
+        echo "<div class='ssl-note'>הסוגים שנבחרו יוצגו בתווית צבעונית לצד כל רשומה בטבלה הראשית. ניתן לגרור או למלא שני סוגים בכל שורה בזכות הפריסה הרחבה.</div>";
         echo "</div>";
+
 
         echo "<div class='ssl-token-layout'>";
         echo "<div class='ssl-card ssl-card--form ssl-card--general'>";
@@ -4091,16 +4265,56 @@ JS;
         echo "<form id='ssl-general-form' class='ssl-general-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field()
             ."<input type='hidden' name='action' value='{$general_action}'>"
             ."<div class='ssl-card__body ssl-card__body--compact ssl-general-grid'>"
-            ."  <label><span>מרווח בין בדיקות רציפות (שניות)</span><input type='number' name='manual_interval' min='1' step='1' max='".esc_attr(DAY_IN_SECONDS)."' value='".esc_attr($manual_interval)."'></label>"
-            ."  <label><span>Default Gateway לבדיקות</span><input type='text' name='default_gateway' placeholder='10.0.0.1 / ISP' value='".esc_attr($default_gateway_value)."'></label>"
             ."  <label><span>ימים להתראת תפוגה</span><input type='number' name='expiry_alert_days' min='1' max='365' value='".esc_attr($expiry_alert_days)."'></label>"
-            ."  <input type='hidden' name='monitor_email' value='".esc_attr($monitor_email_value)."'>"
+            ."  <label class='ssl-toggle'><input type='checkbox' name='log_file_enabled' value='1'".checked($log_file_enabled_value,true,false)."> הפעל רישום לקובץ לוג של התוסף</label>"
             ."</div>";
-        echo "<div class='ssl-card__footer'><button class='ssl-btn ssl-btn-primary' type='submit'>שמור הגדרות</button><span class='ssl-note'>המרווח חל על הפעולה \"בדוק את כל הדומיינים\" ועל ניטור החיבור האוטומטי.</span></div>";
+        echo "<div class='ssl-card__footer'><button class='ssl-btn ssl-btn-primary' type='submit'>שמור הגדרות</button><span class='ssl-note'>הגדרות כלליות עבור התוסף, כולל הפעלת רישום לקובץ.</span></div>";
+        echo "</form>";
+        echo "<form id='".esc_attr($test_mail_form_id)."' class='ssl-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."' hidden>".$this->nonce_field()
+            ."<input type='hidden' name='action' value='{$test_mail_action}'>"
+            ."</form>";
+        echo "</div>";
+        echo "</div>";
+
+        echo "<div class='ssl-card ssl-card--form ssl-card--monitor'>";
+        echo "<div class='ssl-card__header'><h3>ניטור טוקנים</h3></div>";
+        echo "<form id='ssl-monitor-form' class='ssl-general-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field()
+            ."<input type='hidden' name='action' value='{$general_action}'>"
+            ."<div class='ssl-card__body ssl-card__body--compact ssl-general-grid ssl-general-grid--monitor'>"
+            ."  <label><span>דוא\"ל לניטור (ראשי)</span><input type='email' name='monitor_email' placeholder='alerts@example.com' value='".esc_attr($monitor_email_value)."'></label>"
+            ."  <label class='ssl-general-grid__full'><span>דוא\"ל נוספים (שורה לכל כתובת או מופרד בפסיקים)</span><textarea name='token_alert_emails' rows='3' placeholder='alerts@example.com&#10;ops@example.com'>".esc_textarea($token_alert_emails_value)."</textarea></label>"
+            ."  <label><span>עיכוב לפני התראת נפילה (בשניות)</span><input type='number' name='token_alert_initial_seconds' min='60' max='86400' value='".esc_attr($token_alert_initial)."'></label>"
+            ."  <label><span>תדירות התראות נוספות (בשניות)</span><input type='number' name='token_alert_repeat_seconds' min='300' max='86400' value='".esc_attr($token_alert_repeat)."'></label>"
+            ."</div>";
+        echo "<div class='ssl-card__footer'><button class='ssl-btn ssl-btn-primary' type='submit'>שמור ניטור</button><span class='ssl-note'>ההתראות נשלחות לכל הכתובות ברשימה גם אם הטוקן אינו מאומת.</span></div>";
         echo "</form>";
         echo "</div>";
 
-        echo "<div class='ssl-card ssl-card--form ssl-card--token-create'>";
+        echo "<div class='ssl-card ssl-card--form ssl-card--mail'>";
+        echo "<div class='ssl-card__header'><h3>הגדרות דואר</h3></div>";
+        echo "<form id='ssl-mail-form' class='ssl-general-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field()
+            ."<input type='hidden' name='action' value='{$general_action}'>"
+            ."<div class='ssl-card__body ssl-card__body--compact ssl-general-grid'>"
+            ."  <label><span>שרת SMTP</span><input type='text' name='smtp_host' placeholder='smtp.example.com' value='".esc_attr($smtp_host_value)."'></label>"
+            ."  <label><span>שם משתמש SMTP</span><input type='text' name='smtp_username' value='".esc_attr($smtp_username_value)."'></label>"
+            ."  <label><span>סיסמה</span><input type='password' name='smtp_password' value='".esc_attr($smtp_password_value)."' autocomplete='new-password'></label>"
+            ."  <label><span>פורט</span><input type='number' name='smtp_port' min='1' max='65535' value='".esc_attr($smtp_port_value)."'></label>"
+            ."  <label><span>הצפנה</span><select name='smtp_encryption'><option value=''".selected($smtp_encryption_value,'',false).">ללא</option><option value='ssl'".selected($smtp_encryption_value,'ssl',false).">SSL</option><option value='tls'".selected($smtp_encryption_value,'tls',false).">TLS</option></select></label>"
+            ."  <label><span>כתובת שולח</span><input type='email' name='smtp_from' placeholder='alerts@example.com' value='".esc_attr($smtp_from_value)."'></label>"
+            ."  <label><span>שם שולח</span><input type='text' name='smtp_from_name' placeholder='SSL Monitor' value='".esc_attr($smtp_from_name_value)."'></label>"
+            ."</div>";
+        echo "<div class='ssl-card__footer'><div class='ssl-card__footer-actions'><button class='ssl-btn ssl-btn-primary' type='submit'>שמור הגדרות דואר</button>";
+        echo "<button class='ssl-btn ssl-btn-surface' type='submit' form='".esc_attr($test_mail_form_id)."'>בדיקת שליחת דואר</button></div><span class='ssl-note'>שדות אלו משמשים לשליחת התראות מהתוסף.</span></div>";
+        echo "</form>";
+        echo "<form id='".esc_attr($test_mail_form_id)."' class='ssl-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."' hidden>".$this->nonce_field()
+            ."<input type='hidden' name='action' value='{$test_mail_action}'>"
+            ."</form>";
+        echo "</div>";
+        echo "</div>";
+
+        echo "<div class='ssl-card ssl-card--form ssl-card--tokens'>";
+        echo "<div class='ssl-card__header'><h3>ניהול טוקנים</h3></div>";
+        echo "<div class='ssl-card__body'>";
         echo "<form class='ssl-token-create' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field().""
                 ."<input type='hidden' name='action' value='{$add_action}'>"
                 ."<div class='ssl-token-create__fields'>"
@@ -4109,19 +4323,6 @@ JS;
                 ."</div>"
                 ."<p class='ssl-note'>הוסיפו טוקנים לפי הצורך והשתמשו בערך שלהם בבקשות מרוחקות.</p>"
               ."</form>";
-        echo "</div>";
-        echo "</div>";
-
-        $forms = '';
-        foreach($tokens as $token){
-            $form_id = 'ssl-token-manage-'.sanitize_key($token['id']);
-            $forms .= "<form id='".esc_attr($form_id)."' class='ssl-token-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field().""
-                    ."<input type='hidden' name='action' value='{$manage_action}'>"
-                    ."<input type='hidden' name='token_id' value='".esc_attr($token['id'])."'>"
-                 ."</form>";
-        }
-        echo $forms;
-
         echo "<div class='ssl-table-scroll ssl-table-scroll--tokens'>";
         echo "<table class='ssl-table ssl-token-table'>";
         echo "<thead><tr><th>שם הטוקן</th><th>ערך הטוקן</th><th>סטטוס חיבור</th><th style='width:240px'>פעולות</th></tr></thead>";
@@ -4160,6 +4361,17 @@ JS;
         echo "</table>";
         echo "</div>";
         echo "</div>";
+        echo "</div>";
+
+        $forms = '';
+        foreach($tokens as $token){
+            $form_id = 'ssl-token-manage-'.sanitize_key($token['id']);
+            $forms .= "<form id='".esc_attr($form_id)."' class='ssl-token-hidden-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field().""
+                    ."<input type='hidden' name='action' value='{$manage_action}'>"
+                    ."<input type='hidden' name='token_id' value='".esc_attr($token['id'])."'>"
+                 ."</form>";
+        }
+        echo $forms;
         return ob_get_clean();
     }
 
@@ -4210,6 +4422,9 @@ JS;
         $total_pages = max(1, (int)ceil($total_found / $per_page));
         $filter_form_id = 'ssl-bulk-filter-form';
         $main_url = $this->resolve_main_page_url();
+        $trash_url = $this->resolve_trash_page_url();
+        $logs_url = $this->resolve_logs_page_url();
+        $settings_url = $this->resolve_token_page_url();
         $preserved_query = [];
         foreach($request as $key => $value){
             if(strpos($key, 'ssl_bulk_') === 0 || strpos($key, 'bulk_') === 0){
@@ -4223,7 +4438,10 @@ JS;
         echo "<div class='ssl-manager__header'>";
         echo "<div class='ssl-manager__title'><h2>עריכה קבוצתית</h2><div class='ssl-manager__subtitle'>תצוגת GRID פתוחה לעריכה עם כל השדות המרכזיים.</div></div>";
         echo "<div class='ssl-manager__header-actions'>";
-        echo "<a class='ssl-btn ssl-btn-outline' href='".esc_url($main_url)."'>חזרה לטבלה</a>";
+        echo "<a class='ssl-btn ssl-btn-outline' href='".esc_url($logs_url)."'>לוג פעילות</a>";
+        echo "<a class='ssl-btn ssl-btn-outline' href='".esc_url($settings_url)."'>הגדרות</a>";
+        echo "<a class='ssl-btn ssl-btn-outline' href='".esc_url($trash_url)."'>סל מחזור</a>";
+        echo "<a class='ssl-btn ssl-btn-surface' href='".esc_url($main_url)."'>חזרה לטבלה</a>";
         echo "</div>";
         echo "</div>";
         echo "<form id='".esc_attr($filter_form_id)."' class='ssl-bulk-editor__filter-form' method='get'>";
@@ -4231,12 +4449,13 @@ JS;
         echo "<input type='hidden' name='ssl_bulk_sort' value='".esc_attr($sort)."'>";
         echo "<input type='hidden' name='ssl_bulk_order' value='".esc_attr($order)."'>";
         echo "</form>";
+        echo "<div class='ssl-bulk-grid__wrapper'>";
         echo "<table class='ssl-table ssl-bulk-grid'><thead>";
         echo "<tr>";
         echo "<th>#</th>";
-        echo "<th>שם הלקוח</th>";
-        echo "<th>אתר</th>";
-        echo "<th>CN</th>";
+        echo "<th>".$this->build_bulk_sort_link('client_name','שם הלקוח',$sort,$order,$preserved_query)."</th>";
+        echo "<th>".$this->build_bulk_sort_link('site_url','אתר',$sort,$order,$preserved_query)."</th>";
+        echo "<th>".$this->build_bulk_sort_link('common_name','CN',$sort,$order,$preserved_query)."</th>";
         echo "<th>".$this->build_bulk_sort_link('expiry_ts','תאריך תפוגה',$sort,$order,$preserved_query)."</th>";
         echo "<th>".$this->build_bulk_sort_link('cert_type','סוג',$sort,$order,$preserved_query)."</th>";
         echo "<th>".$this->build_bulk_sort_link('management_owner','בניהול',$sort,$order,$preserved_query)."</th>";
@@ -4248,11 +4467,11 @@ JS;
         echo "<tr class='ssl-bulk-grid__filters-row'>";
         echo "<th><input type='number' form='".esc_attr($filter_form_id)."' name='ssl_bulk_per_page' min='1' value='".esc_attr($per_page)."' class='ssl-bulk-grid__per-page' aria-label='רשומות בעמוד'></th>";
         echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='bulk_client' value='".esc_attr($filter_client)."' placeholder='לקוח'></th>";
-        echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='bulk_site' value='".esc_attr($filter_site)."' placeholder='אתר'></th>";
-        echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='bulk_cn' value='".esc_attr($filter_cn)."' placeholder='CN'></th>";
+        echo "<th><input class='ssl-bulk-grid__input-site' type='text' form='".esc_attr($filter_form_id)."' name='bulk_site' value='".esc_attr($filter_site)."' placeholder='אתר'></th>";
+        echo "<th><input class='ssl-bulk-grid__input-cn' type='text' form='".esc_attr($filter_form_id)."' name='bulk_cn' value='".esc_attr($filter_cn)."' placeholder='CN'></th>";
         echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='ssl_bulk_expiry_hint' value='' placeholder='סינון לפי תאריך' disabled></th>";
         echo "<th><input type='text' form='".esc_attr($filter_form_id)."' name='bulk_cert_type' value='".esc_attr($filter_cert_type)."' placeholder='סוג'></th>";
-        echo "<th><select form='".esc_attr($filter_form_id)."' name='bulk_management'><option value=''>הכל</option><option value='ours'".selected($filter_management,'ours',false).">שלנו</option><option value='not-ours'".selected($filter_management,'not-ours',false).">לא שלנו</option></select></th>";
+        echo "<th><select class='ssl-bulk-grid__input-management' form='".esc_attr($filter_form_id)."' name='bulk_management'><option value=''>הכל</option><option value='ours'".selected($filter_management,'ours',false).">שלנו</option><option value='not-ours'".selected($filter_management,'not-ours',false).">לא שלנו</option></select></th>";
         echo "<th><select form='".esc_attr($filter_form_id)."' name='bulk_manual'><option value=''>הכל</option><option value='1'".selected($filter_manual,'1',false).">ידני</option><option value='0'".selected($filter_manual,'0',false).">אוטומטי</option></select></th>";
         echo "<th></th><th></th>";
         echo "<th><button class='ssl-btn ssl-btn-primary' type='submit' form='".esc_attr($filter_form_id)."'>סנן</button></th>";
@@ -4283,11 +4502,11 @@ JS;
                 echo "<tr>";
                 echo "<td class='ssl-bulk-grid__id'>".esc_html($id)."</td>";
                 echo "<td><input form='".esc_attr($form_id)."' type='text' name='client_name' value='".esc_attr($client)."'></td>";
-                echo "<td><input form='".esc_attr($form_id)."' type='text' name='site_url' value='".esc_attr($url)."'></td>";
-                echo "<td><input form='".esc_attr($form_id)."' type='text' name='cert_cn' value='".esc_attr($cn)."'></td>";
+                echo "<td><input class='ssl-bulk-grid__input-site' form='".esc_attr($form_id)."' type='text' name='site_url' value='".esc_attr($url)."'></td>";
+                echo "<td><input class='ssl-bulk-grid__input-cn' form='".esc_attr($form_id)."' type='text' name='cert_cn' value='".esc_attr($cn)."'></td>";
                 echo "<td><input form='".esc_attr($form_id)."' type='date' name='expiry_date' value='".esc_attr($this->fmt_date_input($expiry))."'></td>";
                 echo "<td><select form='".esc_attr($form_id)."' name='cert_type'>".$cert_type_options_current."</select></td>";
-                echo "<td><select form='".esc_attr($form_id)."' name='management_owner'><option value='ours'".selected($management_owner,'ours',false).">שלנו</option><option value='not-ours'".selected($management_owner,'not-ours',false).">לא שלנו</option></select></td>";
+                echo "<td><select class='ssl-bulk-grid__input-management' form='".esc_attr($form_id)."' name='management_owner'><option value='ours'".selected($management_owner,'ours',false).">שלנו</option><option value='not-ours'".selected($management_owner,'not-ours',false).">לא שלנו</option></select></td>";
                 $manual_checked = $manual_mode_row ? " checked" : '';
                 echo "<td class='ssl-bulk-grid__checkbox'><input form='".esc_attr($form_id)."' type='checkbox' name='manual_mode' value='1'{$manual_checked}></td>";
                 $temp_checked = $temporary_enabled ? " checked" : '';
@@ -4300,6 +4519,7 @@ JS;
             echo "<tr><td colspan='11' class='ssl-empty'>אין נתונים לעריכה</td></tr>";
         }
         echo "</tbody></table>";
+        echo "</div>";
 
         if($total_pages > 1){
             $pagination_args = [];
@@ -4599,12 +4819,35 @@ JS;
         $posted_interval = isset($_POST['manual_interval']) ? (int)$_POST['manual_interval'] : $current['manual_interval'];
         $posted_gateway = isset($_POST['default_gateway']) ? sanitize_text_field(wp_unslash($_POST['default_gateway'])) : '';
         $posted_email = isset($_POST['monitor_email']) ? sanitize_email(wp_unslash($_POST['monitor_email'])) : '';
+        $posted_alert_emails_raw = isset($_POST['token_alert_emails']) ? wp_unslash($_POST['token_alert_emails']) : '';
+        $posted_alert_emails = $this->parse_email_list($posted_alert_emails_raw);
+        $posted_alert_initial = isset($_POST['token_alert_initial_seconds']) ? (int)$_POST['token_alert_initial_seconds'] : ($current['token_alert_initial_seconds'] ?? 300);
+        $posted_alert_repeat = isset($_POST['token_alert_repeat_seconds']) ? (int)$_POST['token_alert_repeat_seconds'] : ($current['token_alert_repeat_seconds'] ?? 3600);
         $expiry_days = isset($_POST['expiry_alert_days']) ? (int)$_POST['expiry_alert_days'] : ($current['expiry_alert_days'] ?? 30);
+        $smtp_host = array_key_exists('smtp_host', $_POST) ? sanitize_text_field(wp_unslash($_POST['smtp_host'])) : ($current['smtp_host'] ?? '');
+        $smtp_username = array_key_exists('smtp_username', $_POST) ? sanitize_text_field(wp_unslash($_POST['smtp_username'])) : ($current['smtp_username'] ?? '');
+        $smtp_password = array_key_exists('smtp_password', $_POST) ? wp_strip_all_tags((string)wp_unslash($_POST['smtp_password'])) : ($current['smtp_password'] ?? '');
+        $smtp_port = array_key_exists('smtp_port', $_POST) ? (int)$_POST['smtp_port'] : ($current['smtp_port'] ?? 587);
+        $smtp_encryption = array_key_exists('smtp_encryption', $_POST) ? sanitize_text_field(wp_unslash($_POST['smtp_encryption'])) : ($current['smtp_encryption'] ?? '');
+        $smtp_from = array_key_exists('smtp_from', $_POST) ? sanitize_email(wp_unslash($_POST['smtp_from'])) : ($current['smtp_from'] ?? '');
+        $smtp_from_name = array_key_exists('smtp_from_name', $_POST) ? sanitize_text_field(wp_unslash($_POST['smtp_from_name'])) : ($current['smtp_from_name'] ?? '');
+        $log_file_enabled = array_key_exists('log_file_enabled', $_POST) ? (!empty($_POST['log_file_enabled']) ? 1 : 0) : ($current['log_file_enabled'] ?? 0);
         $merged = array_merge($current, [
             'manual_interval' => $posted_interval,
             'default_gateway' => $posted_gateway,
             'monitor_email' => $posted_email,
+            'token_alert_emails' => $posted_alert_emails,
+            'token_alert_initial_seconds' => $posted_alert_initial,
+            'token_alert_repeat_seconds' => $posted_alert_repeat,
             'expiry_alert_days' => $expiry_days,
+            'smtp_host' => $smtp_host,
+            'smtp_username' => $smtp_username,
+            'smtp_password' => $smtp_password,
+            'smtp_port' => $smtp_port,
+            'smtp_encryption' => $smtp_encryption,
+            'smtp_from' => $smtp_from,
+            'smtp_from_name' => $smtp_from_name,
+            'log_file_enabled' => $log_file_enabled,
         ]);
         $normalized = $this->sanitize_general_settings($merged);
         update_option(self::OPTION_SETTINGS, $normalized, false);
@@ -4612,7 +4855,13 @@ JS;
             'manual_interval' => $normalized['manual_interval'],
             'default_gateway' => $normalized['default_gateway'],
             'monitor_email' => $normalized['monitor_email'],
+            'token_alert_emails' => implode(',', $normalized['token_alert_emails']),
             'expiry_alert_days' => $normalized['expiry_alert_days'],
+            'smtp_host' => $normalized['smtp_host'] !== '' ? '***' : '',
+            'smtp_username' => $normalized['smtp_username'] !== '' ? '***' : '',
+            'smtp_port' => $normalized['smtp_port'],
+            'smtp_encryption' => $normalized['smtp_encryption'],
+            'log_file_enabled' => $normalized['log_file_enabled'],
         ], $this->get_current_actor_context()));
         $redirect = wp_get_referer();
         if(!$redirect){
@@ -4622,6 +4871,67 @@ JS;
         $redirect = add_query_arg('ssl_general', 1, $redirect);
         wp_safe_redirect($redirect);
         exit;
+    }
+
+    public function handle_send_test_email(){
+        $this->check_nonce();
+        if(!current_user_can('manage_options')){
+            wp_die('אין לך הרשאה לבצע פעולה זו');
+        }
+        $redirect = wp_get_referer();
+        if(!$redirect){
+            $redirect = $this->resolve_token_page_url();
+        }
+        $status_param = 'ssl_test_mail';
+        $emails = $this->get_monitor_emails();
+        if(empty($emails)){
+            wp_safe_redirect(add_query_arg($status_param, 'no-recipients', $redirect));
+            exit;
+        }
+        if(!function_exists('wp_mail')){
+            wp_safe_redirect(add_query_arg($status_param, 'no-mailer', $redirect));
+            exit;
+        }
+        $target = implode(', ', $emails);
+        $site = wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES);
+        $subject = sprintf('בדיקת שליחת מייל - %s', $site);
+        $body = "שלום,\n\nזוהי הודעת בדיקה מתוסף SSL Expiry Manager.\nזמן: " . date_i18n('d.m.Y H:i') . "\nנמען: {$target}\n\nאם התקבלה הודעה זו, הגדרות ה-SMTP תקינות.";
+        $sent = wp_mail($emails, $subject, $body);
+        $this->log_activity('בוצעה בדיקת שליחת מייל', array_merge([
+            'recipients' => $emails,
+            'sent' => (bool)$sent,
+        ], $this->get_current_actor_context()), $sent ? 'info' : 'warning');
+        $redirect = add_query_arg($status_param, $sent ? 'sent' : 'failed', $redirect);
+        wp_safe_redirect($redirect);
+        exit;
+    }
+
+    public function handle_mail_failure($wp_error){
+        if(!($wp_error instanceof \WP_Error)){
+            return;
+        }
+        $context = [
+            'error_code' => $wp_error->get_error_code(),
+            'error_message' => $wp_error->get_error_message(),
+        ];
+        $data = $wp_error->get_error_data();
+        if(is_array($data)){
+            if(!empty($data['to'])){
+                $context['recipients'] = $this->parse_email_list($data['to']);
+            }
+            if(!empty($data['subject'])){
+                $context['subject'] = wp_strip_all_tags((string)$data['subject']);
+            }
+            if(isset($data['phpmailer_exception_code'])){
+                $context['mailer_code'] = (int)$data['phpmailer_exception_code'];
+            }
+            if(!empty($data['debug_info']) && is_scalar($data['debug_info'])){
+                $context['debug_info'] = wp_strip_all_tags((string)$data['debug_info']);
+            }
+        } elseif(is_string($data)){
+            $context['error_data'] = wp_strip_all_tags($data);
+        }
+        $this->log_activity('שליחת מייל נכשלה', array_merge($context, $this->get_current_actor_context()), 'error');
     }
 
     public function handle_toggle_follow_up(){
@@ -5213,34 +5523,78 @@ JS;
         if(!is_array($state)){
             $state = [];
         }
-        $window = 600;
-        $has_contact = $this->has_recent_agent_contact($window);
+        $settings = $this->get_general_settings();
+        $initial_seconds = isset($settings['token_alert_initial_seconds']) ? (int)$settings['token_alert_initial_seconds'] : 300;
+        if($initial_seconds < 60){
+            $initial_seconds = 60;
+        }
+        $repeat_seconds = isset($settings['token_alert_repeat_seconds']) ? (int)$settings['token_alert_repeat_seconds'] : 3600;
+        if($repeat_seconds < 300){
+            $repeat_seconds = 300;
+        }
+        $window = max(60, $initial_seconds);
+        $repeat_window = max(60, $repeat_seconds);
         $emails = $this->get_monitor_emails();
         $now = time();
         $last_status = isset($state['status']) ? $state['status'] : 'unknown';
         $last_notice = isset($state['last_notice']) ? (int)$state['last_notice'] : 0;
-        if(!$has_contact){
-            $should_notify = ($last_status !== 'down') || (($now - $last_notice) > HOUR_IN_SECONDS);
-            if($should_notify){
-                if(!empty($emails) && function_exists('wp_mail')){
-                    $gateway = $this->get_default_gateway_label();
-                    $subject = sprintf('התראת חיבור סוכן SSL - %s', wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES));
-                    $body = "שלום,\n\nלא זוהתה תקשורת פעילה מול סוכן ה-SSL במהלך \"בדיקה חיה\".\nאתר: " . home_url('/') . "\nזמן: " . date_i18n('d.m.Y H:i') . "\nחלון בדיקה: " . ($window/60) . " דקות\nGateway: " . ($gateway ? $gateway : 'לא הוגדר') . "\n\nהמערכת תמשיך לנסות להתחבר אחת ל-5 דקות.";
-                    foreach($emails as $email){
-                        wp_mail($email, $subject, $body);
-                    }
+        $token_notices = isset($state['token_notices']) && is_array($state['token_notices']) ? $state['token_notices'] : [];
+        $previous_down = isset($state['down_tokens']) && is_array($state['down_tokens']) ? $state['down_tokens'] : [];
+        $stale_tokens = $this->get_stale_tokens($window);
+        if(!empty($stale_tokens)){
+            $notify_tokens = [];
+            foreach($stale_tokens as $token){
+                $token_id = isset($token['id']) ? $token['id'] : '';
+                $last_for_token = isset($token_notices[$token_id]) ? (int)$token_notices[$token_id] : 0;
+                if(($now - $last_for_token) >= $repeat_window || $last_for_token === 0){
+                    $notify_tokens[] = $token;
+                    $token_notices[$token_id] = $now;
                 }
-                $this->log_activity('ניטור חיבור: לא זוהתה תקשורת מהסוכן', [
-                    'window_seconds' => $window,
-                    'monitor_email' => implode(',', $emails),
-                ], 'warning');
-                $state['last_notice'] = $now;
             }
+            $should_notify = ($last_status !== 'down') || (($now - $last_notice) >= $repeat_window) || !empty($notify_tokens);
+            if($should_notify && !empty($emails) && function_exists('wp_mail')){
+                $names = [];
+                foreach($stale_tokens as $token){
+                    $name = isset($token['name']) ? $token['name'] : 'טוקן ללא שם';
+                    $last_seen = !empty($token['last_seen']) ? date_i18n('d.m.Y H:i', (int)$token['last_seen']) : 'לא התקבל חיבור';
+                    $names[] = sprintf('%s (אחרון: %s)', $name, $last_seen);
+                }
+                $subject = sprintf('התראת חיבור טוקן SSL - %s', wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES));
+                $body = "שלום,\n\nלא זוהתה תקשורת עם הטוקנים הבאים במהלך חלון של " . ceil($window / 60) . " דקות:\n- " . implode("\n- ", $names) . "\n\nהמערכת תמשיך לנסות להתחבר ולשלוח התראות כל " . ceil($repeat_window / 60) . " דקות עד להתאוששות.";
+                foreach($emails as $email){
+                    wp_mail($email, $subject, $body);
+                }
+            }
+            $this->log_activity('ניטור חיבור: טוקנים לא זמינים', [
+                'window_seconds' => $window,
+                'monitor_email' => implode(',', $emails),
+                'token_names' => array_map(function($token){ return $token['name'] ?? ''; }, $stale_tokens),
+            ], 'warning');
+            $state['last_notice'] = $now;
             $state['status'] = 'down';
+            $state['token_notices'] = $token_notices;
+            $state['down_tokens'] = array_map(function($token){
+                return [
+                    'id' => $token['id'] ?? '',
+                    'name' => $token['name'] ?? '',
+                    'last_seen' => $token['last_seen'] ?? 0,
+                ];
+            }, $stale_tokens);
             update_option(self::OPTION_MONITOR_STATE, $state, false);
             return;
         }
         if($last_status === 'down'){
+            $recovered = [];
+            foreach($previous_down as $token){
+                $recovered[] = isset($token['name']) ? $token['name'] : 'טוקן ללא שם';
+            }
+            if(!empty($emails) && !empty($recovered) && function_exists('wp_mail')){
+                $subject = sprintf('חזרה לפעילות - טוקני SSL', wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES));
+                $body = "שלום,\n\nהחיבור לטוקנים הבאים חודש:\n- " . implode("\n- ", $recovered) . "\n\nנשלחה התראה זו לאחר שהמערכת זיהתה התאוששות.";
+                foreach($emails as $email){
+                    wp_mail($email, $subject, $body);
+                }
+            }
             $this->log_activity('ניטור חיבור: הסוכן חזר לתקשר', [
                 'window_seconds' => $window,
                 'monitor_email' => implode(',', $emails),
@@ -5248,6 +5602,8 @@ JS;
         }
         $state['status'] = 'up';
         $state['last_notice'] = $now;
+        $state['token_notices'] = $token_notices;
+        $state['down_tokens'] = [];
         update_option(self::OPTION_MONITOR_STATE, $state, false);
     }
     private function next_midnight_gmt(){
