@@ -6,19 +6,20 @@
  * Author: Ofri + GPT
  */
  
-add_filter( 'rest_authentication_errors', function( $result, $server, $request ) {
-
-    $route = $request->get_route();
-
-    // Allow REST access for our agent only
-    if ( strpos( $route, 'ssl-agent/v1' ) !== false ) {
+add_filter(
+    'rest_authentication_errors',
+    function( $result, $server, $request ) {
+        $route = $request->get_route();
+        // לא נוגעים בכלום אם זה לא ה-route של הסוכן
+        if ( strpos( $route, 'ssl-agent/v1' ) === false ) {
+            return $result;
+        }
+        // עבור ssl-agent/v1 – לא חוסמים, נותנים ל-rest_auth של התוסף לטפל בטוקן
         return null;
-    }
-
-    // Default behavior for the rest of WordPress
-    return $result;
-
-}, 0, 3 );
+    },
+    99,
+    3
+);
 
 if (!defined('ABSPATH')) exit;
 
@@ -5993,7 +5994,16 @@ JS;
         ]);
     }
     private function rest_auth($req){
-        $token=$req->get_header('x-agent-token') ?: '';
+        $token = $req->get_header('x-agent-token');
+        if(!$token){
+            $token = (string)($req->get_param('token') ?? '');
+        }
+        if(!$token){
+            $json_params = $req->get_json_params();
+            if(is_array($json_params) && !empty($json_params['token'])){
+                $token = (string)$json_params['token'];
+            }
+        }
         if(!$token){
             $this->log_activity('בקשת Agent ללא טוקן', $this->get_current_actor_context(), 'warning');
             return new WP_Error('forbidden','invalid token',['status'=>403]);
