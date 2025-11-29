@@ -6,28 +6,20 @@
  * Author: Ofri + GPT
  */
  
- add_filter('rest_authentication_errors', function($result){
-    $route = $_GET['rest_route'] ?? ($_SERVER['REQUEST_URI'] ?? '');
-    if (strpos($route, '/ssl-agent/v1/') === false) return $result;
-
-    $hdr = $_SERVER['HTTP_X_AGENT_TOKEN'] ?? '';
-    if(!$hdr){
-        return new WP_Error('forbidden','missing token',['status'=>403]);
-    }
-
-    global $wpdb;
-    $table = $wpdb->prefix . 'ssl_agents';
-    $agent = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE token = %s LIMIT 1", $hdr), ARRAY_A);
-    if($agent){
-        $wpdb->update($table,[
-            'last_seen' => current_time('mysql', true),
-            'status'    => 'online',
-        ],['id'=>(int)$agent['id']]);
-        return ['agent'=>$agent];
-    }
-
-    return new WP_Error('forbidden','bad token',['status'=>403]);
-}, 0);
+add_filter(
+    'rest_authentication_errors',
+    function( $result, $server, $request ) {
+        $route = $request->get_route();
+        // לא נוגעים בכלום אם זה לא ה-route של הסוכן
+        if ( strpos( $route, 'ssl-agent/v1' ) === false ) {
+            return $result;
+        }
+        // עבור ssl-agent/v1 – לא חוסמים, נותנים ל-rest_auth של התוסף לטפל בטוקן
+        return null;
+    },
+    99,
+    3
+);
 
 if (!defined('ABSPATH')) exit;
 
@@ -6002,7 +5994,16 @@ JS;
         ]);
     }
     private function rest_auth($req){
-        $token=$req->get_header('x-agent-token') ?: '';
+        $token = $req->get_header('x-agent-token');
+        if(!$token){
+            $token = (string)($req->get_param('token') ?? '');
+        }
+        if(!$token){
+            $json_params = $req->get_json_params();
+            if(is_array($json_params) && !empty($json_params['token'])){
+                $token = (string)$json_params['token'];
+            }
+        }
         if(!$token){
             $this->log_activity('בקשת Agent ללא טוקן', $this->get_current_actor_context(), 'warning');
             return new WP_Error('forbidden','invalid token',['status'=>403]);
