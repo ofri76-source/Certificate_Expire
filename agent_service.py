@@ -29,6 +29,21 @@ CFG_PATH = os.path.join(CFG_DIR, "config.json")
 LOG_DIR = os.path.join(CFG_DIR, "log")
 CABUNDLE_PATH = os.path.join(CFG_DIR, "ca-bundle.pem")
 
+# --- Agent configuration ---
+# Change WP_BASE_URL if the WordPress domain is different.
+WP_BASE_URL = "https://kb.macomp.co.il"
+POLL_URL = WP_BASE_URL + "/wp-json/ssl-agent/v1/poll"
+ACK_URL = WP_BASE_URL + "/wp-json/ssl-agent/v1/ack"
+REPORT_URL = WP_BASE_URL + "/wp-json/ssl-agent/v1/report"
+
+# Replace with the exact token from the WordPress plugin.
+AGENT_TOKEN = "<PUT_AGENT_TOKEN_HERE>"
+
+DEFAULT_HEADERS = {
+    "X-Agent-Token": AGENT_TOKEN,
+    "Content-Type": "application/json",
+}
+
 
 def log_setup():
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -279,182 +294,186 @@ def _decode_json_dict(response, context):
 
 
 def once():
-    c = load_cfg()
     s = sess()
     if s is None:
         log.warning("requests module missing; skipping")
         return
 
-    hdr = {"X-Agent-Token": c["token"], "Content-Type": "application/json"}
+    if not DEFAULT_HEADERS.get("X-Agent-Token"):
+        log.error("AGENT_TOKEN is not configured; aborting poll cycle")
+        return
 
     # PULL TASKS
-    poll_url = build_api_url(c["server_base"], "poll")
-    log.info("polling server: %s", poll_url)
+    log.info("polling server: %s", POLL_URL)
     try:
-        r = s.get(poll_url, headers=hdr, timeout=20)
+        r = s.get(POLL_URL, headers=DEFAULT_HEADERS, params={"limit": 50}, timeout=20)
     except Exception as e:
         log.error("poll error: %s", e)
         return
 
-    if r.status_code != 200:
-        log.warning("poll status=%s", r.status_code)
+    if r.status_code == 403:
+        log.error("Agent auth failed (403) – לבדוק את AGENT_TOKEN או ה-URL")
+        return
+    try:
+        r.raise_for_status()
+    except Exception as e:
+        log.warning("poll status=%s error=%s", r.status_code, e)
         return
 
     payload = _decode_json_dict(r, "poll")
     if payload is None:
         return
 
-    tasks = payload.get("tasks") or payload.get("jobs") or []
-    if not isinstance(tasks, list):
-        log.warning("poll malformed payload, tasks is not a list: %r", tasks)
+    jobs = payload.get("jobs") or payload.get("tasks") or []
+    if not isinstance(jobs, list):
+        log.warning("poll malformed payload, jobs is not a list: %r", jobs)
         return
     pending = payload.get("pending")
     log.info(
-        "poll received tasks=%d pending=%s count=%s",
-        len(tasks),
+        "poll received jobs=%d pending=%s count=%s",
+        len(jobs),
         pending,
         payload.get("count"),
     )
-    if not tasks:
-        log.info("no tasks returned from poll; pending=%s", pending)
+    if not jobs:
+        log.info("no jobs returned from poll; pending=%s", pending)
         return
 
     results = []
     acks = []
-    now = datetime.now(timezone.utc)
+    now_iso = datetime.utcnow().isoformat() + "Z"
 
-    now_iso = now.isoformat() + "Z"
-
-    for t in tasks:
-        if not isinstance(t, dict):
-            log.warning("poll task is not a dict: %r", t)
+    for job in jobs:
+        if not isinstance(job, dict):
+            log.warning("poll job is not a dict: %r", job)
             continue
-        queue_id = t.get("queue_id") or t.get("id")
-        tid = t.get("post_id") or t.get("id")
-        rid = t.get("request_id") or ""
-        if not tid:
+
+        job_id = job.get("id") or job.get("post_id")
+        post_id = job.get("post_id") or job_id
+        queue_id = job.get("queue_id") or job.get("queue_key")
+        request_id = job.get("request_id") or ""
+        site_url = job.get("site_url") or ""
+
+        if not job_id or not post_id:
+            log.warning("job missing id/post_id: %r", job)
             continue
 
         try:
-            host, port, scheme, site_url = _parse_target(t)
-            if scheme.lower() != "https" and port != 443:
-                raise ValueError(f"non-https port={port}")
-
+            host, port, scheme, site_url = _parse_target(job)
             cert = _fetch_cert(host, port)
-            log.info(
-                "processing task id=%s queue_id=%s host=%s port=%s scheme=%s",
-                tid,
-                queue_id,
-                host,
-                port,
-                scheme,
-            )
-            expiry_ts_val = cert.get("expiry_ts") or cert.get("expiryts") or cert.get("not_after")
+            expiry_ts_val = cert.get("expiry_ts") or cert.get("expiryts")
             try:
                 expiry_ts_val = int(expiry_ts_val)
             except Exception:
                 expiry_ts_val = 0
             if expiry_ts_val < 1000000000:
                 expiry_ts_val = 0
+
             status = "ok" if expiry_ts_val > 0 else "error"
+            error_message = "" if status == "ok" else "missing expiry_ts"
             if status == "error":
-                log.warning("task %s missing/invalid expiry (host=%s): %r", tid, host, cert)
+                log.warning(
+                    "job %s missing/invalid expiry (host=%s): %r",
+                    job_id,
+                    host,
+                    cert,
+                )
 
             res = {
-                "id": tid,
-                "post_id": tid,
+                "id": job_id,
+                "post_id": post_id,
                 "queue_id": queue_id,
-                "request_id": rid,
-                "site_url": site_url or "",
-                "check_name": "tls_expiry",
+                "site_url": site_url,
+                "client_name": job.get("client_name", ""),
+                "request_id": request_id,
+                "expiry_ts": expiry_ts_val if status == "ok" else None,
+                "common_name": cert.get("common_name", ""),
+                "issuer_name": cert.get("issuer_name", ""),
                 "status": status,
-                "error": None if status == "ok" else "missing expiry_ts",
-                "latency_ms": None,  # ניתן להוסיף מדידת זמן אם תרצה
+                "error": error_message,
                 "executed_at": now_iso,
                 "source": "agent",
-                "initiator": "poll",
-                "target_host": host,
-                "target_port": port,
-                "scheme": scheme,
-                "expiryts": expiry_ts_val,
-                "expiry_ts": expiry_ts_val,
-                "expiry": expiry_ts_val,
-                "notafter": cert.get("not_after") or "",
-                **cert,
             }
             results.append(res)
-
         except Exception as e:
-            ctx = t.get("context") or {}
-            if isinstance(ctx, str):
-                try:
-                    ctx = json.loads(ctx)
-                except Exception:
-                    ctx = {}
-            elif not isinstance(ctx, dict):
-                ctx = {}
+            log.exception("failed processing job id=%s", job_id)
+            results.append(
+                {
+                    "id": job_id,
+                    "post_id": post_id,
+                    "queue_id": queue_id,
+                    "site_url": site_url,
+                    "client_name": job.get("client_name", ""),
+                    "request_id": request_id,
+                    "expiry_ts": None,
+                    "common_name": "",
+                    "issuer_name": "",
+                    "status": "error",
+                    "error": str(e),
+                    "executed_at": now_iso,
+                    "source": "agent",
+                }
+            )
 
-            res = {
-                "id": tid,
-                "post_id": tid,
-                "queue_id": queue_id,
-                "request_id": rid,
-                "site_url": t.get("site_url") or "",
-                "check_name": "tls_expiry",
-                "status": "error",
-                "error": str(e),
-                "executed_at": now_iso,
-                "source": "agent",
-                "initiator": "poll",
-                "target_host": ctx.get("target_host"),
-                "target_port": ctx.get("target_port"),
-                "scheme": ctx.get("scheme") or "https",
-                "expiry_ts": 0,
-                "not_after": "",
-                "common_name": "",
-                "issuer_name": "",
-                "subject_alt_names": [],
-            }
-            results.append(res)
+        acks.append({"id": job_id, "request_id": request_id})
 
-        acks.append({"id": tid, "request_id": rid})
+    if acks:
+        try:
+            ack_resp = s.post(
+                ACK_URL,
+                headers=DEFAULT_HEADERS,
+                json={"tasks": acks},
+                timeout=10,
+            )
+            if ack_resp.status_code == 403:
+                log.error("Agent auth failed (403) – לבדוק את AGENT_TOKEN או ה-URL")
+                return
+            if ack_resp.status_code != 200:
+                log.warning("ack status=%s body=%s", ack_resp.status_code, ack_resp.text[:500])
+            else:
+                log.info("acknowledged %d tasks", len(acks))
+        except Exception as e:
+            log.error("ack error: %s", e)
 
-    # ACK
-    try:
-        ack_url = build_api_url(c["server_base"], "ack")
-        ack_resp = s.post(ack_url, headers=hdr, json={"tasks": acks}, timeout=20)
-        if ack_resp.status_code != 200:
-            log.warning("ack status=%s body=%s", ack_resp.status_code, ack_resp.text[:500])
-        else:
-            log.info("acknowledged %d tasks", len(acks))
-    except Exception as e:
-        log.error("ack error: %s", e)
-
-    # REPORT
-    try:
-        report_task = next((t for t in tasks if isinstance(t, dict)), None)
-        report_url = _report_url(c["server_base"], report_task)
-        log.info("reporting to %s", report_url)
-        log.info(
-            "reporting %d results: %s",
-            len(results),
-            [
+    if results:
+        results_payload = {
+            "results": [
                 {
                     "id": r.get("id"),
-                    "expiryts": r.get("expiryts"),
-                    "expiry": r.get("expiry"),
+                    "post_id": r.get("post_id"),
+                    "queue_id": r.get("queue_id"),
+                    "site_url": r.get("site_url"),
+                    "client_name": r.get("client_name", ""),
+                    "request_id": r.get("request_id", ""),
+                    "expiry_ts": r.get("expiry_ts"),
+                    "common_name": r.get("common_name", ""),
+                    "issuer_name": r.get("issuer_name", ""),
                     "status": r.get("status"),
+                    "error": r.get("error", ""),
+                    "executed_at": r.get("executed_at"),
+                    "source": "agent",
+                    "queue_key": r.get("queue_id"),
                 }
                 for r in results
-            ],
-        )
-        rr = s.post(report_url, headers=hdr, json={"results": results}, timeout=30)
-        if rr.status_code != 200:
-            log.warning("report status=%s body=%s", rr.status_code, rr.text[:500])
-        else:
-            log.info("report succeeded with status=%s", rr.status_code)
-    except Exception as e:
-        log.error("report error: %s", e)
+            ]
+        }
+
+        try:
+            rr = s.post(
+                REPORT_URL,
+                headers=DEFAULT_HEADERS,
+                json=results_payload,
+                timeout=20,
+            )
+            if rr.status_code == 403:
+                log.error("Agent auth failed (403) – לבדוק את AGENT_TOKEN או ה-URL")
+                return
+            if rr.status_code != 200:
+                log.warning("report status=%s body=%s", rr.status_code, rr.text[:500])
+            else:
+                log.info("report succeeded with status=%s", rr.status_code)
+        except Exception as e:
+            log.error("report error: %s", e)
 
 
 def main():
