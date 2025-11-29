@@ -6,28 +6,19 @@
  * Author: Ofri + GPT
  */
  
- add_filter('rest_authentication_errors', function($result){
-    $route = $_GET['rest_route'] ?? ($_SERVER['REQUEST_URI'] ?? '');
-    if (strpos($route, '/ssl-agent/v1/') === false) return $result;
+add_filter( 'rest_authentication_errors', function( $result, $server, $request ) {
 
-    $hdr = $_SERVER['HTTP_X_AGENT_TOKEN'] ?? '';
-    if(!$hdr){
-        return new WP_Error('forbidden','missing token',['status'=>403]);
+    $route = $request->get_route();
+
+    // Allow REST access for our agent only
+    if ( strpos( $route, 'ssl-agent/v1' ) !== false ) {
+        return null;
     }
 
-    global $wpdb;
-    $table = $wpdb->prefix . 'ssl_agents';
-    $agent = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE token = %s LIMIT 1", $hdr), ARRAY_A);
-    if($agent){
-        $wpdb->update($table,[
-            'last_seen' => current_time('mysql', true),
-            'status'    => 'online',
-        ],['id'=>(int)$agent['id']]);
-        return ['agent'=>$agent];
-    }
+    // Default behavior for the rest of WordPress
+    return $result;
 
-    return new WP_Error('forbidden','bad token',['status'=>403]);
-}, 0);
+}, 0, 3 );
 
 if (!defined('ABSPATH')) exit;
 
