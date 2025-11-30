@@ -1,0 +1,2 @@
+[2025-11-29 22:10:25] [INFO] ניטור חיבור: הסוכן חזר לתקשר | {"window_seconds":600,"monitor_email":"ofri@macomp.co.il"}
+[2025-11-29 22:15:08] [WARNING] ניטור חיבור: לא זוהתה תקשורת מהסוכן | {"window_seconds":600,"monitor_email":"ofri@macomp.co.il"}
