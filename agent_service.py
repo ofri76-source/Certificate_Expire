@@ -36,11 +36,14 @@ POLL_URL = WP_BASE_URL + "/wp-json/ssl-agent/v1/poll"
 ACK_URL = WP_BASE_URL + "/wp-json/ssl-agent/v1/ack"
 REPORT_URL = WP_BASE_URL + "/wp-json/ssl-agent/v1/report"
 
-# Replace with the exact token from the WordPress plugin.
-AGENT_TOKEN = "<PUT_AGENT_TOKEN_HERE>"
+# Must match the header name used in the WordPress plugin (e.g., $req->get_header('x-agent-token')).
+AGENT_AUTH_HEADER = "X-Agent-Token"
+
+# Replace with the exact token from the WordPress plugin (no extra spaces).
+AGENT_TOKEN = "<PUT_AGENT_TOKEN_HERE>".strip()
 
 DEFAULT_HEADERS = {
-    "X-Agent-Token": AGENT_TOKEN,
+    AGENT_AUTH_HEADER: AGENT_TOKEN,
     "Content-Type": "application/json",
 }
 
@@ -77,6 +80,17 @@ def load_cfg():
     c["server_base"] = c["server_base"].strip().rstrip("/")
     c["token"] = c["token"].strip()
     return c
+
+
+def _token_configured() -> bool:
+    token = DEFAULT_HEADERS.get(AGENT_AUTH_HEADER, "")
+    if not token or "<PUT_AGENT_TOKEN_HERE>" in token:
+        log.error(
+            "AGENT_TOKEN is not configured; set %s to the exact value from the WordPress token page",
+            AGENT_AUTH_HEADER,
+        )
+        return False
+    return True
 
 
 def sess():
@@ -299,7 +313,7 @@ def once():
         log.warning("requests module missing; skipping")
         return
 
-    if not DEFAULT_HEADERS.get("X-Agent-Token"):
+    if not _token_configured():
         log.error("AGENT_TOKEN is not configured; aborting poll cycle")
         return
 
@@ -312,7 +326,13 @@ def once():
         return
 
     if r.status_code == 403:
-        log.error("Agent auth failed (403) – לבדוק את AGENT_TOKEN או ה-URL")
+        log.error(
+            "Agent auth failed (403) – verify %s header and AGENT_TOKEN match the WordPress plugin",
+            AGENT_AUTH_HEADER,
+        )
+        return
+    if r.status_code == 401:
+        log.error("Agent request returned 401 – check upstream web server authentication before WordPress")
         return
     try:
         r.raise_for_status()
@@ -426,7 +446,15 @@ def once():
                 timeout=10,
             )
             if ack_resp.status_code == 403:
-                log.error("Agent auth failed (403) – לבדוק את AGENT_TOKEN או ה-URL")
+                log.error(
+                    "Agent auth failed (403) – verify %s header and AGENT_TOKEN match the WordPress plugin",
+                    AGENT_AUTH_HEADER,
+                )
+                return
+            if ack_resp.status_code == 401:
+                log.error(
+                    "Agent request returned 401 – check upstream web server authentication before WordPress"
+                )
                 return
             if ack_resp.status_code != 200:
                 log.warning("ack status=%s body=%s", ack_resp.status_code, ack_resp.text[:500])
@@ -466,7 +494,15 @@ def once():
                 timeout=20,
             )
             if rr.status_code == 403:
-                log.error("Agent auth failed (403) – לבדוק את AGENT_TOKEN או ה-URL")
+                log.error(
+                    "Agent auth failed (403) – verify %s header and AGENT_TOKEN match the WordPress plugin",
+                    AGENT_AUTH_HEADER,
+                )
+                return
+            if rr.status_code == 401:
+                log.error(
+                    "Agent request returned 401 – check upstream web server authentication before WordPress"
+                )
                 return
             if rr.status_code != 200:
                 log.warning("report status=%s body=%s", rr.status_code, rr.text[:500])

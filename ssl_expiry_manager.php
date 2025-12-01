@@ -6,28 +6,20 @@
  * Author: Ofri + GPT
  */
  
- add_filter('rest_authentication_errors', function($result){
-    $route = $_GET['rest_route'] ?? ($_SERVER['REQUEST_URI'] ?? '');
-    if (strpos($route, '/ssl-agent/v1/') === false) return $result;
-
-    $hdr = $_SERVER['HTTP_X_AGENT_TOKEN'] ?? '';
-    if(!$hdr){
-        return new WP_Error('forbidden','missing token',['status'=>403]);
-    }
-
-    global $wpdb;
-    $table = $wpdb->prefix . 'ssl_agents';
-    $agent = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE token = %s LIMIT 1", $hdr), ARRAY_A);
-    if($agent){
-        $wpdb->update($table,[
-            'last_seen' => current_time('mysql', true),
-            'status'    => 'online',
-        ],['id'=>(int)$agent['id']]);
-        return ['agent'=>$agent];
-    }
-
-    return new WP_Error('forbidden','bad token',['status'=>403]);
-}, 0);
+add_filter(
+    'rest_authentication_errors',
+    function( $result, $server, $request ) {
+        $route = $request->get_route();
+        // לא נוגעים בכלום אם זה לא ה-route של הסוכן
+        if ( strpos( $route, 'ssl-agent/v1' ) === false ) {
+            return $result;
+        }
+        // עבור ssl-agent/v1 – לא חוסמים, נותנים ל-rest_auth של התוסף לטפל בטוקן
+        return null;
+    },
+    99,
+    3
+);
 
 if (!defined('ABSPATH')) exit;
 
@@ -60,6 +52,8 @@ class SSL_Expiry_Manager_AIO {
     const TABLE_AGENTS = 'ssl_agents';
     const QUEUE_CLAIM_TTL = 300; // 5 minutes
     const QUEUE_MAX_ATTEMPTS = 5;
+    const QUEUE_STATUS_QUEUED = 0;
+    const QUEUE_STATUS_CLAIMED = 1;
     const TOKEN_STALE_WINDOW = 300; // 5 minutes
     const LOG_FILE_NAME = 'ssl_em_debug.log';
     const ADD_TOKEN_ACTION    = 'ssl_add_token';
@@ -245,7 +239,7 @@ class SSL_Expiry_Manager_AIO {
             agent_token VARCHAR(100) NOT NULL DEFAULT '',
             enqueued_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
             request_id VARCHAR(100) NOT NULL DEFAULT '',
-            status VARCHAR(20) NOT NULL DEFAULT 'queued',
+            status TINYINT UNSIGNED NOT NULL DEFAULT 0,
             claimed_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
             attempts INT UNSIGNED NOT NULL DEFAULT 0,
             PRIMARY KEY (id),
@@ -256,6 +250,8 @@ class SSL_Expiry_Manager_AIO {
         ) {$charset};";
         dbDelta($sql);
 
+        $this->ensure_task_queue_schema();
+
         if($this->queue_table_exists()){
             $count = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table}");
             if($count === 0){
@@ -265,6 +261,34 @@ class SSL_Expiry_Manager_AIO {
             }
             delete_option(self::OPTION_QUEUE);
         }
+    }
+
+    private function ensure_task_queue_schema(){
+        if(!$this->queue_table_exists()){
+            return;
+        }
+        global $wpdb;
+        $table = $this->get_queue_table_name();
+
+        $wpdb->query("ALTER TABLE {$table} MODIFY status TINYINT UNSIGNED NOT NULL DEFAULT 0");
+        $wpdb->query("ALTER TABLE {$table} MODIFY attempts INT UNSIGNED NOT NULL DEFAULT 0");
+        $wpdb->query("ALTER TABLE {$table} MODIFY claimed_at BIGINT UNSIGNED NOT NULL DEFAULT 0");
+        $wpdb->query("ALTER TABLE {$table} MODIFY enqueued_at BIGINT UNSIGNED NOT NULL DEFAULT 0");
+
+        // Normalize legacy text statuses to numeric values used by the agent flow.
+        $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = %d WHERE status IS NULL OR status = '' OR status = 'queued'", self::QUEUE_STATUS_QUEUED));
+        $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = %d WHERE status = 'claimed'", self::QUEUE_STATUS_CLAIMED));
+    }
+
+    private function log_db_error_if_any($message){
+        global $wpdb;
+        if(!empty($wpdb->last_error)){
+            $this->log_activity($message, array_merge([
+                'db_error' => $wpdb->last_error,
+            ], $this->get_current_actor_context()), 'error');
+            return true;
+        }
+        return false;
     }
 
     public function ensure_agent_table(){
@@ -2093,10 +2117,10 @@ JS;
                 'agent_token' => isset($item['agent_token']) ? sanitize_text_field($item['agent_token']) : '',
                 'enqueued_at' => isset($item['enqueued_at']) ? (int)$item['enqueued_at'] : time(),
                 'request_id'  => isset($item['request_id']) ? sanitize_text_field($item['request_id']) : '',
-                'status'      => isset($item['status']) ? sanitize_text_field($item['status']) : 'queued',
+                'status'      => isset($item['status']) ? (int)$item['status'] : self::QUEUE_STATUS_QUEUED,
                 'claimed_at'  => isset($item['claimed_at']) ? (int)$item['claimed_at'] : 0,
                 'attempts'    => isset($item['attempts']) ? (int)$item['attempts'] : 0,
-            ], ['%d','%s','%s','%s','%s','%d','%s','%s','%d','%d']);
+            ], ['%d','%s','%s','%s','%s','%d','%s','%d','%d','%d']);
         }
     }
 
@@ -2119,8 +2143,11 @@ JS;
                 $request_id = 'job'.wp_generate_password(10, false, false);
                 $changed = true;
             }
-            $status = isset($item['status']) && in_array($item['status'], ['queued','claimed'], true) ? $item['status'] : 'queued';
-            if(!isset($item['status']) || $item['status'] !== $status){
+            $status_val = isset($item['status']) ? (int)$item['status'] : self::QUEUE_STATUS_QUEUED;
+            if($status_val !== self::QUEUE_STATUS_QUEUED && $status_val !== self::QUEUE_STATUS_CLAIMED){
+                $status_val = self::QUEUE_STATUS_QUEUED;
+            }
+            if(!isset($item['status']) || (int)$item['status'] !== $status_val){
                 $changed = true;
             }
             $agent_token = isset($item['agent_token']) ? sanitize_text_field($item['agent_token']) : '';
@@ -2132,7 +2159,7 @@ JS;
                 'agent_token' => $agent_token,
                 'enqueued_at' => isset($item['enqueued_at']) ? (int)$item['enqueued_at'] : time(),
                 'request_id'  => $request_id,
-                'status'      => $status,
+                'status'      => $status_val,
                 'claimed_at'  => isset($item['claimed_at']) ? (int)$item['claimed_at'] : 0,
                 'attempts'    => isset($item['attempts']) ? (int)$item['attempts'] : 0,
             ];
@@ -2162,7 +2189,7 @@ JS;
                 'agent_token'=> isset($row['agent_token']) ? sanitize_text_field((string)$row['agent_token']) : '',
                 'enqueued_at'=> isset($row['enqueued_at']) ? (int)$row['enqueued_at'] : 0,
                 'request_id' => isset($row['request_id']) ? sanitize_text_field((string)$row['request_id']) : '',
-                'status'     => isset($row['status']) && in_array($row['status'], ['queued','claimed'], true) ? $row['status'] : 'queued',
+                'status'     => isset($row['status']) ? (int)$row['status'] : self::QUEUE_STATUS_QUEUED,
                 'claimed_at' => isset($row['claimed_at']) ? (int)$row['claimed_at'] : 0,
                 'attempts'   => isset($row['attempts']) ? (int)$row['attempts'] : 0,
             ];
@@ -2176,7 +2203,15 @@ JS;
         }
         global $wpdb;
         $table = $this->get_queue_table_name();
-        $updated = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = 'queued', claimed_at = 0 WHERE status = 'claimed' AND claimed_at > 0 AND claimed_at < %d", $threshold));
+        $updated = $wpdb->query(
+            $wpdb->prepare(
+                "UPDATE {$table} SET status = %d, claimed_at = 0 WHERE status = %d AND claimed_at > 0 AND claimed_at < %d",
+                self::QUEUE_STATUS_QUEUED,
+                self::QUEUE_STATUS_CLAIMED,
+                $threshold
+            )
+        );
+        $this->log_db_error_if_any('שגיאת מסד נתונים בעת שחרור משימות תקועות');
         return $updated > 0;
     }
 
@@ -2186,7 +2221,7 @@ JS;
         }
         global $wpdb;
         $table = $this->get_queue_table_name();
-        $count = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE status = 'queued' AND attempts < %d", self::QUEUE_MAX_ATTEMPTS));
+        $count = $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE status = %d AND attempts < %d", self::QUEUE_STATUS_QUEUED, self::QUEUE_MAX_ATTEMPTS));
         return (int)$count;
     }
 
@@ -2239,10 +2274,10 @@ JS;
             'agent_token' => $agent_token,
             'enqueued_at' => time(),
             'request_id'  => $request_id,
-            'status'      => 'queued',
+            'status'      => self::QUEUE_STATUS_QUEUED,
             'claimed_at'  => 0,
             'attempts'    => 0,
-        ], ['%d','%s','%s','%s','%d','%s','%s','%d','%d']);
+        ], ['%d','%s','%s','%s','%s','%d','%s','%d','%d','%d']);
         update_post_meta($post_id,'expiry_ts_checked_at', time());
         $this->sync_table_record($post_id, get_post_status($post_id));
         $post = get_post($post_id);
@@ -2270,10 +2305,6 @@ JS;
         $table = $this->get_queue_table_name();
         $now   = time();
 
-        // 0 = queued, 1 = claimed
-        $STATUS_QUEUED  = 0;
-        $STATUS_CLAIMED = 1;
-
         // שליפת משימות במצב queued בלבד, ללא סינון לפי agent/token
         $rows = $wpdb->get_results(
             $wpdb->prepare(
@@ -2282,12 +2313,16 @@ JS;
                  WHERE status = %d AND attempts < %d
                  ORDER BY enqueued_at ASC, id ASC
                  LIMIT %d",
-                $STATUS_QUEUED,
+                self::QUEUE_STATUS_QUEUED,
                 self::QUEUE_MAX_ATTEMPTS,
                 $limit
             ),
             ARRAY_A
         );
+        $this->log_db_error_if_any('שגיאת מסד נתונים בעת שליפת משימות לתצוגה');
+        if($this->log_db_error_if_any('שגיאת מסד נתונים בעת שליפת משימות לסוכן')){
+            return new WP_Error('db_error','database error',['status'=>500]);
+        }
 
         $claimed  = array();
         $jobs_log = array();
@@ -2302,7 +2337,7 @@ JS;
             $updated = $wpdb->update(
                 $table,
                 array(
-                    'status'     => $STATUS_CLAIMED,
+                    'status'     => self::QUEUE_STATUS_CLAIMED,
                     'claimed_at' => $now,
                     'attempts'   => $attempts,
                 ),
@@ -2325,7 +2360,7 @@ JS;
                 'context'     => $ctx,
                 'enqueued_at' => isset( $row['enqueued_at'] ) ? (int) $row['enqueued_at'] : 0,
                 'request_id'  => isset( $row['request_id'] ) ? (string) $row['request_id'] : '',
-                'status'      => 'claimed', // לוגי בלבד – במערכת זה 1
+                'status'      => self::QUEUE_STATUS_CLAIMED,
                 'claimed_at'  => $now,
                 'attempts'    => $attempts,
             );
@@ -2370,8 +2405,8 @@ JS;
         }
         global $wpdb;
         $table = $this->get_queue_table_name();
-        $sql = "SELECT post_id, site_url, client_name, context, agent_token, enqueued_at, request_id, attempts FROM {$table} WHERE status = 'queued' AND attempts < %d";
-        $params = [self::QUEUE_MAX_ATTEMPTS];
+        $sql = "SELECT post_id, site_url, client_name, context, agent_token, enqueued_at, request_id, attempts FROM {$table} WHERE status = %d AND attempts < %d";
+        $params = [self::QUEUE_STATUS_QUEUED, self::QUEUE_MAX_ATTEMPTS];
         if($agent_filter !== null && $agent_filter !== ''){
             $sql .= " AND agent_token = %s";
             $params[] = sanitize_text_field($agent_filter);
@@ -2379,6 +2414,9 @@ JS;
         $sql .= " ORDER BY enqueued_at ASC LIMIT %d";
         $params[] = $limit;
         $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params), ARRAY_A);
+        if($this->log_db_error_if_any('שגיאת מסד נתונים בעת שליפת משימות ממתינות')){
+            return [];
+        }
         foreach((array)$rows as $row){
             $tasks[] = [
                 'id'          => (int)$row['post_id'],
@@ -2389,7 +2427,7 @@ JS;
                 'agent_token' => isset($row['agent_token']) ? sanitize_text_field((string)$row['agent_token']) : '',
                 'enqueued_at' => isset($row['enqueued_at']) ? (int)$row['enqueued_at'] : 0,
                 'request_id'  => isset($row['request_id']) ? sanitize_text_field((string)$row['request_id']) : '',
-                'status'      => 'queued',
+                'status'      => self::QUEUE_STATUS_QUEUED,
                 'attempts'    => isset($row['attempts']) ? (int)$row['attempts'] : 0,
                 'callback'    => rest_url('ssl-agent/v1/report'),
             ];
@@ -6008,7 +6046,16 @@ JS;
         ]);
     }
     private function rest_auth($req){
-        $token=$req->get_header('x-agent-token') ?: '';
+        $token = $req->get_header('x-agent-token');
+        if(!$token){
+            $token = (string)($req->get_param('token') ?? '');
+        }
+        if(!$token){
+            $json_params = $req->get_json_params();
+            if(is_array($json_params) && !empty($json_params['token'])){
+                $token = (string)$json_params['token'];
+            }
+        }
         if(!$token){
             $this->log_activity('בקשת Agent ללא טוקן', $this->get_current_actor_context(), 'warning');
             return new WP_Error('forbidden','invalid token',['status'=>403]);
@@ -6068,9 +6115,6 @@ JS;
         $table = $this->get_queue_table_name();
         $now   = time();
 
-        $STATUS_QUEUED  = 0;
-        $STATUS_CLAIMED = 1;
-
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 "SELECT id AS queue_id, post_id, site_url, client_name, context, enqueued_at, request_id, status, attempts
@@ -6078,12 +6122,15 @@ JS;
                  WHERE status = %d AND attempts < %d
                  ORDER BY enqueued_at ASC, id ASC
                  LIMIT %d",
-                $STATUS_QUEUED,
+                self::QUEUE_STATUS_QUEUED,
                 self::QUEUE_MAX_ATTEMPTS,
                 $limit
             ),
             ARRAY_A
         );
+        if($this->log_db_error_if_any('שגיאת מסד נתונים בעת שליפת משימות לסוכן')){
+            return new WP_Error('db_error','database error',['status'=>500]);
+        }
 
         $items = [];
         foreach((array)$rows as $row){
@@ -6095,7 +6142,7 @@ JS;
             $updated = $wpdb->update(
                 $table,
                 [
-                    'status'     => $STATUS_CLAIMED,
+                    'status'     => self::QUEUE_STATUS_CLAIMED,
                     'claimed_at' => $now,
                     'attempts'   => $attempts,
                 ],
@@ -6104,6 +6151,7 @@ JS;
                 ['%d']
             );
             if(false === $updated){
+                $this->log_db_error_if_any('עדכון משימה לתור נכשל בעת סימון claimed');
                 continue;
             }
 
@@ -6438,7 +6486,7 @@ JS;
                 echo '<p>כמות משימות ממתינות: <strong>'.count($queue).'</strong>.</p>';
                 echo '<table class="widefat striped"><thead><tr><th>ID</th><th>לקוח</th><th>URL</th><th>הקשר</th><th>סטטוס</th><th>זמן</th></tr></thead><tbody>';
                 foreach($queue as $job){
-                    $status = $job['status'] === 'claimed' ? 'בתהליך' : 'ממתין';
+                    $status = ((int)$job['status'] === self::QUEUE_STATUS_CLAIMED) ? 'בתהליך' : 'ממתין';
                     $time = !empty($job['claimed_at']) ? (int)$job['claimed_at'] : (int)$job['enqueued_at'];
                     $time_label = $time ? date_i18n('d/m/Y H:i', $time) : '';
                     echo '<tr>';
