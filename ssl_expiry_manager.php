@@ -994,7 +994,7 @@ class SSL_Expiry_Manager_AIO {
 .ssl-group-placeholder{display:inline-block;min-width:16px;color:#cbd5f5;}
 .ssl-date-field{display:flex;flex-direction:column;gap:6px;color:#475569;font-weight:600;font-size:.85rem;}
 .ssl-date-field__controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-.ssl-date-field__controls input[type=date]{flex:1 1 160px;min-width:0;}
+.ssl-date-field__controls input[data-ssl-date-input]{flex:1 1 160px;min-width:0;}
 .ssl-date-field__controls .ssl-btn{white-space:nowrap;flex:0 0 auto;}
 .ssl-color-cell{min-width:110px;text-align:left;direction:ltr;white-space:nowrap;}
 .ssl-color-pill{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:.2rem .7rem;border-radius:999px;font-weight:700;font-size:.8rem;min-width:90px;text-align:center;background:var(--ssl-pill-color,#1e293b);color:var(--ssl-pill-text,#fff);box-shadow:0 6px 14px rgba(15,23,42,.14);}
@@ -1027,6 +1027,7 @@ class SSL_Expiry_Manager_AIO {
 .ssl-row-details__actions{display:flex;flex-direction:column;gap:6px;align-items:flex-start;}
 .ssl-row-details__actions .ssl-btn{width:auto;justify-content:center;min-width:0;}
 .ssl-row-details__actions form{display:flex;}
+.ssl-row-details__delete-form{margin-top:4px;}
 .ssl-btn--compact{padding:.15rem .5rem;font-size:.8rem;}
 .ssl-guide-link{white-space:nowrap;}
 .ssl-manager--compact .ssl-table thead th,.ssl-manager--compact .ssl-table tbody td{padding:8px 10px;font-size:.85rem;}
@@ -1175,7 +1176,7 @@ class SSL_Expiry_Manager_AIO {
 .ssl-bulk-grid__filters-row input,.ssl-bulk-grid__filters-row select{width:100%;padding:.35rem .45rem;border:1px solid #cbd5f5;border-radius:8px;background:#fff;font-size:.85rem;}
 .ssl-bulk-grid__per-page{max-width:70px;text-align:center;}
 .ssl-bulk-grid__temporary textarea,.ssl-bulk-grid textarea{width:100%;min-height:36px;resize:vertical;}
-.ssl-bulk-grid input[type=text],.ssl-bulk-grid input[type=date],.ssl-bulk-grid select{min-width:180px;}
+.ssl-bulk-grid input[type=text],.ssl-bulk-grid select{min-width:180px;}
 .ssl-bulk-grid textarea{min-width:220px;}
 .ssl-bulk-grid__input-site{min-width:2560px;}
 .ssl-bulk-grid__input-cn{min-width:1600px;}
@@ -1250,7 +1251,7 @@ function sslSetNextYearDate(control){
   var year = next.getFullYear();
   var month = String(next.getMonth() + 1).padStart(2,'0');
   var day = String(next.getDate()).padStart(2,'0');
-  var value = year + '-' + month + '-' + day;
+  var value = day + '-' + month + '-' + year;
   input.value = value;
   input.dispatchEvent(new Event('input', {bubbles:true}));
   input.dispatchEvent(new Event('change', {bubbles:true}));
@@ -1910,7 +1911,7 @@ JS;
         return $form;
     }
     private function fmt_date($ts){ return $ts ? date_i18n('d-m-Y', $ts) : ''; }
-    private function fmt_date_input($ts){ return $ts ? date_i18n('Y-m-d', $ts) : ''; }
+    private function fmt_date_input($ts){ return $ts ? date_i18n('d-m-Y', $ts) : ''; }
     private function parse_user_date($value){
         $value = trim((string)$value);
         if($value === ''){
@@ -3547,7 +3548,7 @@ JS;
               ."  <div class='ssl-card__body ssl-card__body--compact'>"
               ."    <label>שם הלקוח<input type='text' name='client_name' required></label>"
               ."    <label>אתר (URL)<input type='text' name='site_url' placeholder='example.com' data-ssl-create-site data-ssl-autofill-url><span class='ssl-form-warning' data-ssl-warning-site hidden></span><label class='ssl-checkbox ssl-checkbox--inline ssl-checkbox--sub'><input type='checkbox' name='allow_duplicate_site' value='1'> אפשר כפילות בשם האתר</label></label>"
-              ."    <label class='ssl-date-field ssl-form-span-2'><span>תאריך תפוגה</span><div class='ssl-date-field__controls'><input type='date' name='expiry_date' data-ssl-date-input><label class='ssl-checkbox ssl-checkbox--inline'><input type='checkbox' name='manual_mode' value='1'> ידני (ללא בדיקות אוטומטיות)</label><button type='button' class='ssl-btn ssl-btn-outline' data-ssl-date-next-year>היום בשנה הבאה</button></div></label>"
+              ."    <label class='ssl-date-field ssl-form-span-2'><span>תאריך תפוגה</span><div class='ssl-date-field__controls'><input type='text' name='expiry_date' data-ssl-date-input placeholder='dd-mm-yyyy' pattern='\\d{2}-\\d{2}-\\d{4}' inputmode='numeric'><label class='ssl-checkbox ssl-checkbox--inline'><input type='checkbox' name='manual_mode' value='1'> ידני (ללא בדיקות אוטומטיות)</label><button type='button' class='ssl-btn ssl-btn-outline' data-ssl-date-next-year>היום בשנה הבאה</button></div></label>"
               ."    <label><span>סוג</span><select name='cert_type' data-ssl-create-type>".$cert_type_options_default."</select></label>"
               ."    <label><span>בניהול</span><select name='management_owner'><option value='ours'>שלנו</option><option value='not-ours'>לא שלנו</option></select></label>"
               ."    <label><span>AGENT</span><select name='agent_token'>".$agent_option_markup_default."</select></label>"
@@ -3913,11 +3914,16 @@ JS;
                         '_wpnonce' => $nonce,
                     ], admin_url('admin-post.php'));
                     $refresh_form = "<a class='ssl-btn ssl-btn-outline ssl-btn--compact' href='".esc_url($refresh_url)."'>בדוק עכשיו</a>";
+                    $delete_form = "<form class='ssl-row-details__delete-form' method='post' action='".esc_url(admin_url('admin-post.php'))."'>".$this->nonce_field()
+                        ."<input type='hidden' name='action' value='".esc_attr(self::DELETE_ACTION)."' />"
+                        ."<input type='hidden' name='post_id' value='".esc_attr($id)."' />"
+                        ."<button class='ssl-btn ssl-btn-danger ssl-btn--compact' type='submit' onclick=\"return confirm('להעביר לסל מחזור?')\">מחק</button>"
+                        ."</form>";
                     $guide_button = '';
                     if($guide_url !== ''){
                         $guide_button = "<a class='ssl-btn ssl-btn-outline ssl-btn--compact ssl-guide-link' target='_blank' rel='noopener' href='".esc_url($guide_url)."'>מדריך</a>";
                     }
-                    $actions_detail = "<div class='ssl-row-details__actions'><button type='button' class='ssl-btn ssl-btn-surface ssl-btn--compact' data-ssl-edit='".esc_attr($id)."'>עריכה</button>".$refresh_form.$guide_button."</div>";
+                    $actions_detail = "<div class='ssl-row-details__actions'><button type='button' class='ssl-btn ssl-btn-surface ssl-btn--compact' data-ssl-edit='".esc_attr($id)."'>עריכה</button>".$refresh_form.$delete_form.$guide_button."</div>";
                     $details_html = "<div class='ssl-row-details__wrap'>"
                         ."<div class='ssl-row-details__section'><h4>הגדרות</h4>{$meta_html}</div>"
                         ."<div class='ssl-row-details__section'><h4>הערות</h4><div>{$notes_html}</div></div>"
@@ -3944,7 +3950,7 @@ JS;
                         ."<div class='ssl-card__body ssl-card__body--compact'>"
                         ."<label>שם הלקוח<input type='text' name='client_name' value='".esc_attr($client)."'></label>"
                         ."<label>אתר (URL)<input type='text' name='site_url' value='".esc_attr($url)."' data-ssl-autofill-url><label class='ssl-checkbox ssl-checkbox--inline ssl-checkbox--sub'><input type='checkbox' name='allow_duplicate_site' value='1' ".checked($allow_duplicate_row,true,false)."> אפשר כפילות בשם האתר</label></label>"
-                        ."<label class='ssl-date-field ssl-form-span-2'><span>תאריך תפוגה</span><div class='ssl-date-field__controls'><input type='date' name='expiry_date' value='".esc_attr($this->fmt_date_input($expiry))."' data-ssl-date-input><label class='ssl-checkbox ssl-checkbox--inline'><input type='checkbox' name='manual_mode' value='1' ".checked($manual_mode_row,true,false)."> ידני (ללא בדיקות אוטומטיות)</label><button type='button' class='ssl-btn ssl-btn-outline' data-ssl-date-next-year>היום בשנה הבאה</button></div></label>"
+                        ."<label class='ssl-date-field ssl-form-span-2'><span>תאריך תפוגה</span><div class='ssl-date-field__controls'><input type='text' name='expiry_date' value='".esc_attr($this->fmt_date_input($expiry))."' data-ssl-date-input placeholder='dd-mm-yyyy' pattern='\\d{2}-\\d{2}-\\d{4}' inputmode='numeric'><label class='ssl-checkbox ssl-checkbox--inline'><input type='checkbox' name='manual_mode' value='1' ".checked($manual_mode_row,true,false)."> ידני (ללא בדיקות אוטומטיות)</label><button type='button' class='ssl-btn ssl-btn-outline' data-ssl-date-next-year>היום בשנה הבאה</button></div></label>"
                         ."<label><span>סוג</span><select name='cert_type'>".$cert_type_options_current."</select></label>"
                         ."<label><span>בניהול</span><select name='management_owner'>".
                             "<option value='ours'".selected($management_owner,'ours',false).">שלנו</option>".
@@ -4504,7 +4510,7 @@ JS;
                 echo "<td><input form='".esc_attr($form_id)."' type='text' name='client_name' value='".esc_attr($client)."'></td>";
                 echo "<td><input class='ssl-bulk-grid__input-site' form='".esc_attr($form_id)."' type='text' name='site_url' value='".esc_attr($url)."'></td>";
                 echo "<td><input class='ssl-bulk-grid__input-cn' form='".esc_attr($form_id)."' type='text' name='cert_cn' value='".esc_attr($cn)."'></td>";
-                echo "<td><input form='".esc_attr($form_id)."' type='date' name='expiry_date' value='".esc_attr($this->fmt_date_input($expiry))."'></td>";
+                echo "<td><input form='".esc_attr($form_id)."' type='text' name='expiry_date' value='".esc_attr($this->fmt_date_input($expiry))."' placeholder='dd-mm-yyyy' pattern='\\d{2}-\\d{2}-\\d{4}' inputmode='numeric'></td>";
                 echo "<td><select form='".esc_attr($form_id)."' name='cert_type'>".$cert_type_options_current."</select></td>";
                 echo "<td><select class='ssl-bulk-grid__input-management' form='".esc_attr($form_id)."' name='management_owner'><option value='ours'".selected($management_owner,'ours',false).">שלנו</option><option value='not-ours'".selected($management_owner,'not-ours',false).">לא שלנו</option></select></td>";
                 $manual_checked = $manual_mode_row ? " checked" : '';
